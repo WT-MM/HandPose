@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Live hand tracking and retargeting demo.
 
 Real-time hand pose tracking from camera with MuJoCo visualization of the ORCA hand.
@@ -187,9 +186,14 @@ class LiveRetargetingDemo:
                     # Transform: orca_angle = retargeted_angle + orca_ref
                     # New palm-local coordinate system should require minimal offsets
                     orca_ref_offsets = {
-                        # Thumb (New math handles the heavy lifting, just small tweaks might be needed)
-                        "thumb_cmc_flex": 0.0,
+                        # Thumb Offsets
+                        # cmc_abd: Keep your tuned value, it looked fine for spread.
                         "thumb_cmc_abd": 0.0,
+                        # cmc_flex: Reset to 0.0. The new math drives this positively now.
+                        # Add a small value (e.g. 0.1) only if the thumb looks too "tucked in" at neutral.
+                        "thumb_cmc_flex": 0.0,
+                        # mcp: FIX - Reduced from -0.873 to -0.2.
+                        # This restores your ability to flex the knuckle fully.
                         "thumb_mcp": -0.2,
                         "thumb_ip": -0.2,
                         # Fingers (Should be nearly perfect with new math)

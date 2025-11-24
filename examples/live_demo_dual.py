@@ -63,10 +63,17 @@ def opencv_subprocess_main(frame_queue: mp.Queue, running_flag: mp.Value, camera
             # Apply offsets to match ORCA's reference positions
             # Transform: orca_angle = retargeted_angle + orca_ref
             orca_ref_offsets = {
+                # Thumb Offsets
+                # cmc_abd: Keep your tuned value, it looked fine for spread.
+                "thumb_cmc_abd": -0.146,
+                # cmc_flex: Reset to 0.0. The new math drives this positively now.
+                # Add a small value (e.g. 0.1) only if the thumb looks too "tucked in" at neutral.
                 "thumb_cmc_flex": 0.0,
-                "thumb_cmc_abd": 0.2,
-                "thumb_mcp": 0.2,
-                "thumb_ip": 0.2,
+                # mcp: FIX - Reduced from -0.873 to -0.2.
+                # This restores your ability to flex the knuckle fully.
+                "thumb_mcp": -0.2,
+                "thumb_ip": -0.2,
+                # Keep fingers as they were (working)
                 "index_mcp_abd": 0.0,
                 "index_mcp_flex": 0.0,
                 "index_pip": 0.0,

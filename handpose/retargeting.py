@@ -30,10 +30,11 @@ class ORCAHandConfig:
     def default_config(cls) -> Self:
         joint_limits = {
             # Thumb joints (CMC = carpometacarpal, MCP = metacarpophalangeal, IP = interphalangeal)
-            "thumb_cmc_abd": (-1.082, 0.0),  # right_thumb_abd
-            "thumb_cmc_flex": (-0.873, 0.873),  # right_thumb_mcp
-            "thumb_mcp": (-0.794, 1.230),  # right_thumb_pip
-            "thumb_ip": (-0.854, 1.450),  # right_thumb_dip
+            # WIDENED LIMITS: Allow positive values momentarily to prevent "stuck" joints
+            "thumb_cmc_abd": (-2.0, 1.0),   # WAS (-1.082, 0.0)
+            "thumb_cmc_flex": (-2.0, 2.0),  # WAS (-0.873, 0.873)
+            "thumb_mcp": (-2.0, 2.0),       # WAS (-0.794, 1.230)
+            "thumb_ip": (-2.0, 2.0),        # WAS (-0.854, 1.450)
             # Index finger
             "index_mcp_abd": (-1.046, 0.246),  # right_index_abd
             "index_mcp_flex": (-0.349, 1.658),  # right_index_mcp
@@ -218,39 +219,51 @@ class ORCAHandRetargeting:
         # Get local palm basis
         palm_x, palm_y, palm_z = self._compute_palm_basis(landmarks)
 
-        # --- CMC Abduction (Moving away from palm plane) ---
-        # Vector from Wrist to CMC
-        cmc_vec = cmc - wrist
-        cmc_vec /= np.linalg.norm(cmc_vec) + 1e-6
-
-        # In ORCA, CMC Abduction is often the rotation around the forward axis
-        # We approximate this by looking at the component along the Palm X axis
-        # relative to the Palm Z (Normal)
-
-        # Project CMC vector onto the X-Z plane (Side-Normal plane)
-        cmc_x = np.dot(cmc_vec, palm_x)
-        cmc_z = np.dot(cmc_vec, palm_z)
-
-        # This angle determines how much the thumb base is "open" relative to the palm
-        thumb_base_angle = np.arctan2(cmc_z, cmc_x)
-
-        # --- CMC Flexion (Moving across the palm) ---
-        # This is roughly the angle of the metacarpal (CMC->MCP) relative to palm side
+        # --- Vector Definition ---
         meta_vec = mcp - cmc
         meta_vec /= np.linalg.norm(meta_vec) + 1e-6
 
+        # --- CMC Abduction (Spread) ---
+        # Lift out of palm plane (Z-axis)
+        meta_z = np.dot(meta_vec, palm_z)
+
+        # Invert sign for ORCA (Negative = Abduction/Open)
+        thumb_abd_angle = -np.arcsin(np.clip(meta_z, -1.0, 1.0))
+
+        # --- CMC Flexion (Sweep) ---
         # Project onto Palm Plane (X-Y)
         meta_x = np.dot(meta_vec, palm_x)
         meta_y = np.dot(meta_vec, palm_y)
 
-        cmc_flex_angle = np.arctan2(meta_y, meta_x)
+        # FIX: The thumb is on the negative X side (Index side).
+        # We want inward sweep (towards Pinky/+X) to be POSITIVE.
+        # - Neutral (-X): angle is pi. (pi - pi = 0)
+        # - Inward (+X): angle is 0. (pi - 0 = pi)
+        cmc_flex_angle = np.pi - np.arctan2(meta_y, meta_x)
 
-        # --- Standard Hinges ---
-        mcp_angle = self._compute_joint_angle(cmc, mcp, ip)
+        # Normalize to [-pi, pi]
+        if cmc_flex_angle > np.pi:
+            cmc_flex_angle -= 2 * np.pi
+        elif cmc_flex_angle < -np.pi:
+            cmc_flex_angle += 2 * np.pi
+
+        # --- MCP Flexion ---
+        prox_vec = ip - mcp
+        prox_vec /= np.linalg.norm(prox_vec) + 1e-6
+
+        # Calculate pure angle between bones (always positive [0, pi])
+        cos_mcp = np.dot(meta_vec, prox_vec)
+        mcp_angle = np.arccos(np.clip(cos_mcp, -1.0, 1.0))
+
+        # FIX: Removed the 'dir_check' logic.
+        # We assume the thumb MCP always flexes inward (positive).
+        # This prevents the joint from snapping backwards.
+
+        # --- IP Flexion ---
         ip_angle = self._compute_joint_angle(mcp, ip, tip)
 
         return {
-            "thumb_cmc_abd": thumb_base_angle - 1.0,  # Offset to align with robot rest pose
+            "thumb_cmc_abd": thumb_abd_angle,
             "thumb_cmc_flex": cmc_flex_angle,
             "thumb_mcp": mcp_angle,
             "thumb_ip": ip_angle,
