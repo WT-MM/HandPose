@@ -184,29 +184,28 @@ class LiveRetargetingDemo:
                     joint_angles_dict = self.retargeting.retarget_pose(landmarks_hand_frame, hand_pose.handedness)
 
                     # Apply offsets to match ORCA's reference positions
-                    # ORCA joints have non-zero ref values (neutral position)
-                    # Our retargeting outputs 0 = extended/neutral, but ORCA expects ref as neutral
                     # Transform: orca_angle = retargeted_angle + orca_ref
-                    # Note: Flexion joints (MCP, PIP) all have ref=0, so no offsets needed
                     orca_ref_offsets = {
-                        # Thumb (all joints have non-zero refs)
-                        "thumb_cmc_flex": 0.0,  # right_thumb_mcp ref=0.0000
-                        "thumb_cmc_abd": -0.7330,  # right_thumb_abd ref=-0.7330
-                        "thumb_mcp": -0.5850,  # right_thumb_pip ref=-0.5850
-                        "thumb_ip": -0.5048,  # right_thumb_dip ref=-0.5048
-                        # Fingers (only abduction joints have non-zero refs)
-                        "index_mcp_abd": -0.4000,  # right_index_abd ref=-0.4000
-                        "index_mcp_flex": 0.0,  # right_index_mcp ref=0.0000 (no offset)
-                        "index_pip": 0.0,  # right_index_pip ref=0.0000 (no offset)
-                        "middle_mcp_abd": 0.0,  # right_middle_abd ref=0.0000 (no offset)
-                        "middle_mcp_flex": 0.0,  # right_middle_mcp ref=0.0000 (no offset)
-                        "middle_pip": 0.0,  # right_middle_pip ref=0.0000 (no offset)
-                        "ring_mcp_abd": 0.1700,  # right_ring_abd ref=0.1700
-                        "ring_mcp_flex": 0.0,  # right_ring_mcp ref=0.0000 (no offset)
-                        "ring_pip": 0.0,  # right_ring_pip ref=0.0000 (no offset)
-                        "pinky_mcp_abd": 0.5233,  # right_pinky_abd ref=0.5233
-                        "pinky_mcp_flex": 0.0,  # right_pinky_mcp ref=0.0000 (no offset)
-                        "pinky_pip": 0.0,  # right_pinky_pip ref=0.0000 (no offset)
+                        # Thumb (Keep these! Thumb calculation is still based on static bones)
+                        "thumb_cmc_flex": 0.0,      # right_thumb_mcp ref=0.0000
+                        "thumb_cmc_abd": -0.7330,   # right_thumb_abd ref=-0.7330
+                        "thumb_mcp": -0.5850,        # right_thumb_pip ref=-0.5850
+                        "thumb_ip": -0.5048,         # right_thumb_dip ref=-0.5048
+                        # Fingers (CHANGE THESE TO 0.0)
+                        # The new dynamic calculation (pip-mcp) naturally finds the zero/neutral point,
+                        # so we no longer need these calibration offsets.
+                        "index_mcp_abd": -0.4/2,       # WAS -0.4000
+                        "index_mcp_flex": 0.0,      # right_index_mcp ref=0.0000
+                        "index_pip": 0.0,          # right_index_pip ref=0.0000
+                        "middle_mcp_abd": 0.0,      # WAS 0.0 (No change)
+                        "middle_mcp_flex": 0.0,     # right_middle_mcp ref=0.0000
+                        "middle_pip": 0.0,          # right_middle_pip ref=0.0000
+                        "ring_mcp_abd": 0.17/2,        # WAS 0.1700
+                        "ring_mcp_flex": 0.0,       # right_ring_mcp ref=0.0000
+                        "ring_pip": 0.0,            # right_ring_pip ref=0.0000
+                        "pinky_mcp_abd": 0.5233/2,       # WAS 0.5233
+                        "pinky_mcp_flex": 0.0,      # right_pinky_mcp ref=0.0000
+                        "pinky_pip": 0.0,           # right_pinky_pip ref=0.0000
                     }
 
                     # Convert to array in correct order

@@ -221,19 +221,19 @@ class ORCAHandRetargeting:
         tip = landmarks[joint_indices[3]]
 
         # MCP abduction (relative to palm center direction)
-        # Use palm center (average of all MCPs) as reference instead of middle finger
-        # This allows all fingers including middle to have non-zero abduction
+        # Use the proximal phalanx (MCP to PIP) to measure finger direction
         index_mcp = landmarks[self.INDEX_FINGER_MCP]
         middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
         ring_mcp = landmarks[self.RING_FINGER_MCP]
         pinky_mcp = landmarks[self.PINKY_MCP]
         palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
-
-        vec_to_finger = mcp - wrist
+        
+        # Use proximal phalanx direction (MCP to PIP) instead of metacarpal (wrist to MCP)
+        vec_to_finger = pip - mcp
         vec_to_palm_center = palm_center - wrist
-
+        
         # Reference direction: from wrist to palm center (forward along hand)
-        # Abduction is the angle from this reference to the finger MCP
+        # Abduction is the angle from this reference to the finger direction (proximal phalanx)
         abd_angle = self._angle_between_vectors(vec_to_palm_center[:2], vec_to_finger[:2])
 
         # MCP flexion
