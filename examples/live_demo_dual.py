@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
+import asyncio
 import multiprocessing as mp
 import time
 from queue import Empty
@@ -16,6 +17,7 @@ from queue import Empty
 import mujoco
 import mujoco.viewer
 import numpy as np
+from askin import KeyboardController
 
 from handpose import ORCAHandRetargeting
 
@@ -77,15 +79,58 @@ def opencv_subprocess_main(frame_queue: mp.Queue, running_flag: mp.Value, camera
         info_text = f"FPS: {fps:.1f} | Hands: {len(hand_poses)}"
         cv2.putText(frame, info_text, (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.imshow("Hand Tracking", frame)
-
-        key = cv2.waitKey(1)
-        if key == ord("q"):
-            running_flag.value = 0  # type: ignore[attr-defined]
-            break
+        cv2.waitKey(1)  # Keep window responsive
 
     cap.release()
     cv2.destroyAllWindows()
     print("[OpenCV] Process finished")
+
+
+async def main_async(
+    model_path: Path,
+    camera_id: int,
+    running_flag: mp.Value,  # type: ignore[valid-type]
+    frame_queue: mp.Queue,
+    qpos_addrs: np.ndarray,
+    mapped_names: list[str],
+) -> None:
+    """Async main loop with keyboard handling."""
+
+    # Keyboard handler
+    async def key_handler(key: str) -> None:
+        if key == "q":
+            running_flag.value = 0  # type: ignore[attr-defined]
+            print("[Main] Quitting...")
+
+    # Initialize keyboard controller in main process
+    controller = KeyboardController(key_handler=key_handler, timeout=0.01)
+    await controller.start()
+
+    # Load MuJoCo model (in main process with mjpython)
+    print("[MuJoCo] Loading model...")
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    data = mujoco.MjData(model)
+
+    try:
+        # Run MuJoCo viewer in main process
+        print("[MuJoCo] Starting viewer...")
+        with mujoco.viewer.launch_passive(model, data) as viewer:
+            while running_flag.value and viewer.is_running():  # type: ignore[attr-defined]
+                # Get latest joint angles from OpenCV process
+                try:
+                    msg_type, joint_angles_dict = frame_queue.get_nowait()
+                    if msg_type == "angles":
+                        joint_angles_array = np.array([joint_angles_dict.get(name, 0.0) for name in mapped_names])
+                        data.qpos[qpos_addrs] = joint_angles_array
+                except Empty:
+                    pass
+
+                # Step simulation
+                mujoco.mj_forward(model, data)
+                viewer.sync()
+                await asyncio.sleep(0.005)
+    finally:
+        await controller.stop()
 
 
 def main() -> None:
@@ -123,12 +168,9 @@ def main() -> None:
     # Give OpenCV time to start
     time.sleep(0.5)
 
-    # Load MuJoCo model (in main process with mjpython)
-    print("[MuJoCo] Loading model...")
-    model = mujoco.MjModel.from_xml_path(str(model_path))
-    data = mujoco.MjData(model)
-
-    # Setup joint mapping
+    # Setup joint mapping (need to load model temporarily to get joint info)
+    print("[MuJoCo] Setting up joint mapping...")
+    temp_model = mujoco.MjModel.from_xml_path(str(model_path))
     retargeting = ORCAHandRetargeting()
     dummy_landmarks = np.zeros((21, 3))
     dummy_angles = retargeting.retarget_pose(dummy_landmarks, "Right")
@@ -158,38 +200,24 @@ def main() -> None:
     for name in retargeted_joint_names:
         orca_name = joint_mapping.get(name)
         if orca_name:
-            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, orca_name)
+            joint_id = mujoco.mj_name2id(temp_model, mujoco.mjtObj.mjOBJ_JOINT, orca_name)
             if joint_id >= 0:
-                qpos_adr = model.jnt_qposadr[joint_id]
+                qpos_adr = temp_model.jnt_qposadr[joint_id]
                 qpos_addrs.append(qpos_adr)
                 mapped_names.append(name)
 
     qpos_addrs = np.array(qpos_addrs)
     print(f"[MuJoCo] Mapped {len(qpos_addrs)} joints")
 
-    # Run MuJoCo viewer in main process
-    print("[MuJoCo] Starting viewer...")
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        while running_flag.value is not None and viewer.is_running():
-            # Get latest joint angles from OpenCV process
-            try:
-                msg_type, joint_angles_dict = frame_queue.get_nowait()
-                if msg_type == "angles":
-                    joint_angles_array = np.array([joint_angles_dict.get(name, 0.0) for name in mapped_names])
-                    data.qpos[qpos_addrs] = joint_angles_array
-            except Empty:
-                pass
-
-            # Step simulation
-            mujoco.mj_forward(model, data)
-            viewer.sync()
-            time.sleep(0.005)
-
-    # Cleanup
-    running_flag.value = 0
-    opencv_proc.join(timeout=2)
-    if opencv_proc.is_alive():
-        opencv_proc.terminate()
+    # Run async main loop
+    try:
+        asyncio.run(main_async(model_path, args.camera, running_flag, frame_queue, qpos_addrs, mapped_names))
+    finally:
+        # Cleanup
+        running_flag.value = 0
+        opencv_proc.join(timeout=2)
+        if opencv_proc.is_alive():
+            opencv_proc.terminate()
 
     print("\n[Main] Demo finished")
 

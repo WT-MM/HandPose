@@ -30,29 +30,29 @@ class ORCAHandConfig:
     def default_config(cls) -> Self:
         joint_limits = {
             # Thumb joints (CMC = carpometacarpal, MCP = metacarpophalangeal, IP = interphalangeal)
-            "thumb_cmc_abd": (-0.3, 0.3),  # Abduction/adduction
-            "thumb_cmc_flex": (0, 1.2),  # Flexion
-            "thumb_mcp": (0, 1.0),
-            "thumb_ip": (0, 1.2),
+            "thumb_cmc_abd": (-1.082, 0.0),  # right_thumb_abd
+            "thumb_cmc_flex": (-0.873, 0.873),  # right_thumb_mcp
+            "thumb_mcp": (-0.794, 1.230),  # right_thumb_pip
+            "thumb_ip": (-0.854, 1.450),  # right_thumb_dip
             # Index finger
-            "index_mcp_abd": (-0.2, 0.2),
-            "index_mcp_flex": (0, 1.57),  # ~90 degrees
-            "index_pip": (0, 1.8),
-            "index_dip": (0, 1.57),
+            "index_mcp_abd": (-1.046, 0.246),  # right_index_abd
+            "index_mcp_flex": (-0.349, 1.658),  # right_index_mcp
+            "index_pip": (-0.349, 1.885),  # right_index_pip
+            "index_dip": (0, 1.57),  # Not in ORCA
             # Middle finger
-            "middle_mcp_abd": (-0.2, 0.2),
-            "middle_mcp_flex": (0, 1.57),
-            "middle_pip": (0, 1.8),
+            "middle_mcp_abd": (-0.646, 0.646),  # right_middle_abd
+            "middle_mcp_flex": (-0.349, 1.588),  # right_middle_mcp
+            "middle_pip": (-0.349, 1.867),  # right_middle_pip
             "middle_dip": (0, 1.57),
             # Ring finger
-            "ring_mcp_abd": (-0.2, 0.2),
-            "ring_mcp_flex": (0, 1.57),
-            "ring_pip": (0, 1.8),
+            "ring_mcp_abd": (-0.476, 0.806),  # right_ring_abd
+            "ring_mcp_flex": (-0.349, 1.588),  # right_ring_mcp
+            "ring_pip": (-0.349, 1.867),  # right_ring_pip
             "ring_dip": (0, 1.57),
             # Pinky finger
-            "pinky_mcp_abd": (-0.3, 0.3),
-            "pinky_mcp_flex": (0, 1.57),
-            "pinky_pip": (0, 1.8),
+            "pinky_mcp_abd": (-0.122, 1.169),  # right_pinky_abd
+            "pinky_mcp_flex": (-0.349, 1.710),  # right_pinky_mcp
+            "pinky_pip": (-0.349, 1.885),  # right_pinky_pip
             "pinky_dip": (0, 1.57),
         }
 
@@ -179,15 +179,22 @@ class ORCAHandRetargeting:
         ip = landmarks[self.THUMB_IP]
         tip = landmarks[self.THUMB_TIP]
 
-        # CMC abduction (angle in XY plane)
+        # CMC abduction (angle in XY plane relative to palm center)
+        # Use palm center as reference for consistent abduction computation
+        index_mcp = landmarks[self.INDEX_FINGER_MCP]
+        middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
+        ring_mcp = landmarks[self.RING_FINGER_MCP]
+        pinky_mcp = landmarks[self.PINKY_MCP]
+        palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
+
         vec_to_cmc = cmc - wrist
-        vec_to_index = landmarks[self.INDEX_FINGER_MCP] - wrist
+        vec_to_palm_center = palm_center - wrist
 
         # Project onto XY plane and compute angle
         vec_to_cmc_xy = vec_to_cmc[:2]
-        vec_to_index_xy = vec_to_index[:2]
+        vec_to_palm_center_xy = vec_to_palm_center[:2]
 
-        abd_angle = self._angle_between_vectors(vec_to_cmc_xy, vec_to_index_xy)
+        abd_angle = self._angle_between_vectors(vec_to_palm_center_xy, vec_to_cmc_xy)
 
         # CMC flexion (angle from palm plane)
         cmc_flex = self._compute_joint_angle(wrist, cmc, mcp)
@@ -213,12 +220,21 @@ class ORCAHandRetargeting:
         dip = landmarks[joint_indices[2]]
         tip = landmarks[joint_indices[3]]
 
-        # MCP abduction (relative to middle finger direction)
+        # MCP abduction (relative to palm center direction)
+        # Use palm center (average of all MCPs) as reference instead of middle finger
+        # This allows all fingers including middle to have non-zero abduction
+        index_mcp = landmarks[self.INDEX_FINGER_MCP]
         middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
-        vec_to_finger = mcp - wrist
-        vec_to_middle = middle_mcp - wrist
+        ring_mcp = landmarks[self.RING_FINGER_MCP]
+        pinky_mcp = landmarks[self.PINKY_MCP]
+        palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
 
-        abd_angle = self._angle_between_vectors(vec_to_finger[:2], vec_to_middle[:2])
+        vec_to_finger = mcp - wrist
+        vec_to_palm_center = palm_center - wrist
+
+        # Reference direction: from wrist to palm center (forward along hand)
+        # Abduction is the angle from this reference to the finger MCP
+        abd_angle = self._angle_between_vectors(vec_to_palm_center[:2], vec_to_finger[:2])
 
         # MCP flexion
         mcp_flex = self._compute_joint_angle(wrist, mcp, pip)

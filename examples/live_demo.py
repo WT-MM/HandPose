@@ -183,11 +183,40 @@ class LiveRetargetingDemo:
                     # Retarget to ORCA hand
                     joint_angles_dict = self.retargeting.retarget_pose(landmarks_hand_frame, hand_pose.handedness)
 
+                    # Apply offsets to match ORCA's reference positions
+                    # ORCA joints have non-zero ref values (neutral position)
+                    # Our retargeting outputs 0 = extended/neutral, but ORCA expects ref as neutral
+                    # Transform: orca_angle = retargeted_angle + orca_ref
+                    # Note: Flexion joints (MCP, PIP) all have ref=0, so no offsets needed
+                    orca_ref_offsets = {
+                        # Thumb (all joints have non-zero refs)
+                        "thumb_cmc_flex": 0.0,  # right_thumb_mcp ref=0.0000
+                        "thumb_cmc_abd": -0.7330,  # right_thumb_abd ref=-0.7330
+                        "thumb_mcp": -0.5850,  # right_thumb_pip ref=-0.5850
+                        "thumb_ip": -0.5048,  # right_thumb_dip ref=-0.5048
+                        # Fingers (only abduction joints have non-zero refs)
+                        "index_mcp_abd": -0.4000,  # right_index_abd ref=-0.4000
+                        "index_mcp_flex": 0.0,  # right_index_mcp ref=0.0000 (no offset)
+                        "index_pip": 0.0,  # right_index_pip ref=0.0000 (no offset)
+                        "middle_mcp_abd": 0.0,  # right_middle_abd ref=0.0000 (no offset)
+                        "middle_mcp_flex": 0.0,  # right_middle_mcp ref=0.0000 (no offset)
+                        "middle_pip": 0.0,  # right_middle_pip ref=0.0000 (no offset)
+                        "ring_mcp_abd": 0.1700,  # right_ring_abd ref=0.1700
+                        "ring_mcp_flex": 0.0,  # right_ring_mcp ref=0.0000 (no offset)
+                        "ring_pip": 0.0,  # right_ring_pip ref=0.0000 (no offset)
+                        "pinky_mcp_abd": 0.5233,  # right_pinky_abd ref=0.5233
+                        "pinky_mcp_flex": 0.0,  # right_pinky_mcp ref=0.0000 (no offset)
+                        "pinky_pip": 0.0,  # right_pinky_pip ref=0.0000 (no offset)
+                    }
+
                     # Convert to array in correct order
                     joint_angles_array = np.zeros(len(self.mujoco_joint_qpos_addrs))
                     for i, name in enumerate(self.retargeted_joint_names):
                         if name in joint_angles_dict:
-                            joint_angles_array[i] = joint_angles_dict[name]
+                            angle = joint_angles_dict[name]
+                            # Apply offset if available
+                            offset = orca_ref_offsets.get(name, 0.0)
+                            joint_angles_array[i] = angle + offset
 
                     # Update MuJoCo state
                     with self.lock:
