@@ -18,6 +18,7 @@ HAND_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/han
 
 EPS = 1e-6
 
+
 class SimpleLandmark:
     def __init__(self, x: float, y: float, w: int, h: int) -> None:
         self.x = x / w
@@ -95,7 +96,7 @@ class HandTracker:
         )
         self.landmarker = vision.HandLandmarker.create_from_options(options)
         self.mp_hands = mp.solutions.hands  # Keep for connection constants
-        
+
         # Smoothing state
         self.smoothing_factor = max(0.0, min(1.0, smoothing_factor))  # Clamp to [0, 1]
         self.previous_landmarks: dict[str, np.ndarray] = {}  # Store previous smoothed landmarks per hand
@@ -176,7 +177,6 @@ class HandTracker:
 
                 # Compute wrist pose (hand root transformation)
                 wrist_pose = self._compute_wrist_pose(landmarks_3d)
-
 
                 hand_pose = HandPose(
                     landmarks_2d=landmarks_2d,

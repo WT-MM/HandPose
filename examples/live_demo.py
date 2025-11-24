@@ -36,7 +36,9 @@ class LiveRetargetingDemo:
         """
         # Initialize hand tracker
         print("Initializing hand tracker...")
-        self.hand_tracker = HandTracker(max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5, smoothing_factor=0.7)
+        self.hand_tracker = HandTracker(
+            max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5, smoothing_factor=0.7
+        )
 
         # Initialize retargeting
         print("Initializing retargeting...")

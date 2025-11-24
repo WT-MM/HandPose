@@ -31,10 +31,10 @@ class ORCAHandConfig:
         joint_limits = {
             # Thumb joints (CMC = carpometacarpal, MCP = metacarpophalangeal, IP = interphalangeal)
             # WIDENED LIMITS: Allow positive values momentarily to prevent "stuck" joints
-            "thumb_cmc_abd": (-2.0, 1.0),   # WAS (-1.082, 0.0)
+            "thumb_cmc_abd": (-2.0, 1.0),  # WAS (-1.082, 0.0)
             "thumb_cmc_flex": (-2.0, 2.0),  # WAS (-0.873, 0.873)
-            "thumb_mcp": (-2.0, 2.0),       # WAS (-0.794, 1.230)
-            "thumb_ip": (-2.0, 2.0),        # WAS (-0.854, 1.450)
+            "thumb_mcp": (-2.0, 2.0),  # WAS (-0.794, 1.230)
+            "thumb_ip": (-2.0, 2.0),  # WAS (-0.854, 1.450)
             # Index finger
             "index_mcp_abd": (-1.046, 0.246),  # right_index_abd
             "index_mcp_flex": (-0.349, 1.658),  # right_index_mcp
