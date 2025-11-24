@@ -171,78 +171,119 @@ class ORCAHandRetargeting:
         mirrored[:, 0] = -mirrored[:, 0]  # Flip X axis
         return mirrored
 
+    def _compute_palm_basis(self, landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute the local coordinate system (basis vectors) of the palm.
+
+        Returns:
+            tuple: (palm_x, palm_y, palm_z)
+            - palm_y: Forward direction (Wrist -> Middle MCP)
+            - palm_x: Side direction (Index -> Pinky)
+            - palm_z: Normal direction (Out of palm)
+        """
+        wrist = landmarks[self.WRIST]
+        index_mcp = landmarks[self.INDEX_FINGER_MCP]
+        middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
+        pinky_mcp = landmarks[self.PINKY_MCP]
+
+        # 1. Primary Axis (Forward - Y)
+        # Vector from wrist to middle finger MCP
+        palm_y = middle_mcp - wrist
+        palm_y /= np.linalg.norm(palm_y) + 1e-6
+
+        # 2. Secondary Axis (Approximate Side - X)
+        # Vector from Index to Pinky
+        palm_x_temp = pinky_mcp - index_mcp
+        palm_x_temp /= np.linalg.norm(palm_x_temp) + 1e-6
+
+        # 3. Normal Axis (Up - Z)
+        # Cross product of X and Y gives the normal pointing out of the palm
+        palm_z = np.cross(palm_x_temp, palm_y)
+        palm_z /= np.linalg.norm(palm_z) + 1e-6
+
+        # 4. Recompute Orthogonal X
+        # Ensure exact orthogonality
+        palm_x = np.cross(palm_y, palm_z)
+        palm_x /= np.linalg.norm(palm_x) + 1e-6
+
+        return palm_x, palm_y, palm_z
+
     def _retarget_thumb(self, landmarks: np.ndarray) -> dict[str, float]:
-        """Retarget thumb joints."""
+        """Retarget thumb joints using Local Palm Coordinates."""
         wrist = landmarks[self.WRIST]
         cmc = landmarks[self.THUMB_CMC]
         mcp = landmarks[self.THUMB_MCP]
         ip = landmarks[self.THUMB_IP]
         tip = landmarks[self.THUMB_TIP]
 
-        # CMC abduction (angle in XY plane relative to palm center)
-        # Use palm center as reference for consistent abduction computation
-        index_mcp = landmarks[self.INDEX_FINGER_MCP]
-        middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
-        ring_mcp = landmarks[self.RING_FINGER_MCP]
-        pinky_mcp = landmarks[self.PINKY_MCP]
-        palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
+        # Get local palm basis
+        palm_x, palm_y, palm_z = self._compute_palm_basis(landmarks)
 
-        vec_to_cmc = cmc - wrist
-        vec_to_palm_center = palm_center - wrist
+        # --- CMC Abduction (Moving away from palm plane) ---
+        # Vector from Wrist to CMC
+        cmc_vec = cmc - wrist
+        cmc_vec /= np.linalg.norm(cmc_vec) + 1e-6
 
-        # Project onto XY plane and compute angle
-        vec_to_cmc_xy = vec_to_cmc[:2]
-        vec_to_palm_center_xy = vec_to_palm_center[:2]
+        # In ORCA, CMC Abduction is often the rotation around the forward axis
+        # We approximate this by looking at the component along the Palm X axis
+        # relative to the Palm Z (Normal)
 
-        abd_angle = self._angle_between_vectors(vec_to_palm_center_xy, vec_to_cmc_xy)
+        # Project CMC vector onto the X-Z plane (Side-Normal plane)
+        cmc_x = np.dot(cmc_vec, palm_x)
+        cmc_z = np.dot(cmc_vec, palm_z)
 
-        # CMC flexion (angle from palm plane)
-        cmc_flex = self._compute_joint_angle(wrist, cmc, mcp)
+        # This angle determines how much the thumb base is "open" relative to the palm
+        thumb_base_angle = np.arctan2(cmc_z, cmc_x)
 
-        # MCP joint
+        # --- CMC Flexion (Moving across the palm) ---
+        # This is roughly the angle of the metacarpal (CMC->MCP) relative to palm side
+        meta_vec = mcp - cmc
+        meta_vec /= np.linalg.norm(meta_vec) + 1e-6
+
+        # Project onto Palm Plane (X-Y)
+        meta_x = np.dot(meta_vec, palm_x)
+        meta_y = np.dot(meta_vec, palm_y)
+
+        cmc_flex_angle = np.arctan2(meta_y, meta_x)
+
+        # --- Standard Hinges ---
         mcp_angle = self._compute_joint_angle(cmc, mcp, ip)
-
-        # IP joint
         ip_angle = self._compute_joint_angle(mcp, ip, tip)
 
         return {
-            "thumb_cmc_abd": abd_angle,
-            "thumb_cmc_flex": cmc_flex,
+            "thumb_cmc_abd": thumb_base_angle - 1.0,  # Offset to align with robot rest pose
+            "thumb_cmc_flex": cmc_flex_angle,
             "thumb_mcp": mcp_angle,
             "thumb_ip": ip_angle,
         }
 
     def _retarget_finger(self, landmarks: np.ndarray, joint_indices: list[int], finger_name: str) -> dict[str, float]:
-        """Retarget a finger (index, middle, ring, or pinky)."""
+        """Retarget a finger using Local Palm Coordinates."""
         wrist = landmarks[self.WRIST]
         mcp = landmarks[joint_indices[0]]
         pip = landmarks[joint_indices[1]]
         dip = landmarks[joint_indices[2]]
         tip = landmarks[joint_indices[3]]
 
-        # MCP abduction (relative to palm center direction)
-        # Use the proximal phalanx (MCP to PIP) to measure finger direction
-        index_mcp = landmarks[self.INDEX_FINGER_MCP]
-        middle_mcp = landmarks[self.MIDDLE_FINGER_MCP]
-        ring_mcp = landmarks[self.RING_FINGER_MCP]
-        pinky_mcp = landmarks[self.PINKY_MCP]
-        palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
-        
-        # Use proximal phalanx direction (MCP to PIP) instead of metacarpal (wrist to MCP)
-        vec_to_finger = pip - mcp
-        vec_to_palm_center = palm_center - wrist
-        
-        # Reference direction: from wrist to palm center (forward along hand)
-        # Abduction is the angle from this reference to the finger direction (proximal phalanx)
-        abd_angle = self._angle_between_vectors(vec_to_palm_center[:2], vec_to_finger[:2])
+        # Get local palm basis
+        palm_x, palm_y, palm_z = self._compute_palm_basis(landmarks)
 
-        # MCP flexion
+        # --- Abduction (Spread) ---
+        # Vector of the proximal phalanx (MCP -> PIP)
+        finger_vec = pip - mcp
+        finger_vec /= np.linalg.norm(finger_vec) + 1e-6
+
+        # Project this vector onto the Palm's X-Y plane
+        # We define abduction as the angle relative to the Forward (Y) axis
+        x_component = np.dot(finger_vec, palm_x)
+        y_component = np.dot(finger_vec, palm_y)
+
+        # Calculate angle using atan2 (robust to all quadrants)
+        # Result: Negative for Index (left of middle), Positive for Pinky (right of middle)
+        abd_angle = np.arctan2(x_component, y_component)
+
+        # --- Flexion ---
         mcp_flex = self._compute_joint_angle(wrist, mcp, pip)
-
-        # PIP joint
         pip_angle = self._compute_joint_angle(mcp, pip, dip)
-
-        # DIP joint
         dip_angle = self._compute_joint_angle(pip, dip, tip)
 
         return {

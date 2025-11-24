@@ -16,6 +16,7 @@ Handedness = Literal["Left", "Right"]
 # Download URL for hand landmarker model
 HAND_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 
+EPS = 1e-6
 
 class SimpleLandmark:
     def __init__(self, x: float, y: float, w: int, h: int) -> None:
@@ -67,6 +68,7 @@ class HandTracker:
         max_num_hands: int = 2,
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
+        smoothing_factor: float = 0.0,
     ) -> None:
         """Initialize hand tracker using modern MediaPipe HandLandmarker API.
 
@@ -75,6 +77,8 @@ class HandTracker:
             max_num_hands: Maximum number of hands to detect
             min_detection_confidence: Minimum confidence for detection
             min_tracking_confidence: Minimum confidence for tracking
+            smoothing_factor: Exponential smoothing factor for 3D landmarks (0.0 = no smoothing, 1.0 = max smoothing).
+                              Higher values = more smoothing but more lag.
         """
         # Download model if not provided
         if model_path is None:
@@ -91,6 +95,10 @@ class HandTracker:
         )
         self.landmarker = vision.HandLandmarker.create_from_options(options)
         self.mp_hands = mp.solutions.hands  # Keep for connection constants
+        
+        # Smoothing state
+        self.smoothing_factor = max(0.0, min(1.0, smoothing_factor))  # Clamp to [0, 1]
+        self.previous_landmarks: dict[str, np.ndarray] = {}  # Store previous smoothed landmarks per hand
 
     def _download_model(self) -> str:
         """Download the hand landmarker model if not already cached."""
@@ -159,12 +167,16 @@ class HandTracker:
                     # Use MediaPipe's world landmarks (metric 3D coordinates)
                     landmarks_3d = np.array([[lm.x, lm.y, lm.z] for lm in hand_world_landmarks])
 
-                # Compute wrist pose (hand root transformation)
-                wrist_pose = self._compute_wrist_pose(landmarks_3d)
-
                 # Get handedness
                 hand_label = handedness_list[0].category_name
                 confidence = handedness_list[0].score
+
+                # Apply smoothing to 3D landmarks
+                landmarks_3d = self._apply_smoothing(landmarks_3d, hand_label)
+
+                # Compute wrist pose (hand root transformation)
+                wrist_pose = self._compute_wrist_pose(landmarks_3d)
+
 
                 hand_pose = HandPose(
                     landmarks_2d=landmarks_2d,
@@ -259,7 +271,7 @@ class HandTracker:
 
         # X-axis: from wrist towards palm center (forward along hand)
         x_axis = palm_center - wrist
-        x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-6)
+        x_axis = x_axis / (np.linalg.norm(x_axis) + EPS)
 
         # Compute palm normal using multiple MCP points for stability
         # Use index-pinky line and middle-ring line to define palm plane
@@ -268,21 +280,21 @@ class HandTracker:
 
         # Average the two vectors for more stability
         palm_sideways = (palm_vec1 + palm_vec2) / 2.0
-        palm_sideways = palm_sideways / (np.linalg.norm(palm_sideways) + 1e-6)
+        palm_sideways = palm_sideways / (np.linalg.norm(palm_sideways) + EPS)
 
         # Z-axis: sideways direction (thumb to pinky)
         z_axis = palm_sideways
-        z_axis = z_axis / (np.linalg.norm(z_axis) + 1e-6)
+        z_axis = z_axis / (np.linalg.norm(z_axis) + EPS)
 
         # Y-axis: perpendicular to palm (out of palm, using right-hand rule)
         y_axis = np.cross(z_axis, x_axis)
-        y_axis = y_axis / (np.linalg.norm(y_axis) + 1e-6)
+        y_axis = y_axis / (np.linalg.norm(y_axis) + EPS)
 
         # Recompute X and Z to ensure orthogonality
         z_axis = np.cross(x_axis, y_axis)
-        z_axis = z_axis / (np.linalg.norm(z_axis) + 1e-6)
+        z_axis = z_axis / (np.linalg.norm(z_axis) + EPS)
         x_axis = np.cross(y_axis, z_axis)
-        x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-6)
+        x_axis = x_axis / (np.linalg.norm(x_axis) + EPS)
 
         # Construct transformation matrix
         transform = np.eye(4)
@@ -292,6 +304,32 @@ class HandTracker:
         transform[:3, 3] = wrist
 
         return transform
+
+    def _apply_smoothing(self, landmarks_3d: np.ndarray, handedness: str) -> np.ndarray:
+        """Apply exponential smoothing to 3D landmarks.
+
+        Args:
+            landmarks_3d: 21x3 array of current 3D landmarks
+            handedness: Hand label ('Left' or 'Right') used as key for tracking
+
+        Returns:
+            Smoothed 21x3 array of landmarks
+        """
+        if self.smoothing_factor <= 0.0:
+            # No smoothing, just store current landmarks
+            self.previous_landmarks[handedness] = landmarks_3d.copy()
+            return landmarks_3d
+
+        alpha = 1.0 - self.smoothing_factor
+
+        if handedness in self.previous_landmarks:
+            smoothed = alpha * landmarks_3d + (1.0 - alpha) * self.previous_landmarks[handedness]
+        else:
+            smoothed = landmarks_3d.copy()
+
+        self.previous_landmarks[handedness] = smoothed.copy()
+
+        return smoothed
 
     def landmarks_in_hand_frame(self, hand_pose: HandPose) -> np.ndarray:
         """Transform landmarks to hand root coordinate frame.

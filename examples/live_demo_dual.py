@@ -63,23 +63,22 @@ def opencv_subprocess_main(frame_queue: mp.Queue, running_flag: mp.Value, camera
             # Apply offsets to match ORCA's reference positions
             # Transform: orca_angle = retargeted_angle + orca_ref
             orca_ref_offsets = {
-                # Thumb (Keep these! Thumb calculation is still based on static bones)
-                "thumb_cmc_flex": 0.0,      # right_thumb_mcp ref=0.0000
-                "thumb_cmc_abd": -0.7330,   # right_thumb_abd ref=-0.7330
-                "thumb_mcp": -0.873,        # right_thumb_pip ref=-0.5850
-                "thumb_ip": -0.5048,         # right_thumb_dip ref=-0.5048
-                "index_mcp_abd": 0.0319,       # WAS -0.4000
-                "index_mcp_flex": 0.0,      # right_index_mcp ref=0.0000
-                "index_pip": 0.0,          # right_index_pip ref=0.0000
-                "middle_mcp_abd": 0.0,      # WAS 0.0 (No change)
-                "middle_mcp_flex": 0.0,     # right_middle_mcp ref=0.0000
-                "middle_pip": 0.0,          # right_middle_pip ref=0.0000
-                "ring_mcp_abd": 0.0465,        # WAS 0.1700
-                "ring_mcp_flex": 0.0,       # right_ring_mcp ref=0.0000
-                "ring_pip": 0.0,            # right_ring_pip ref=0.0000
-                "pinky_mcp_abd": 0.0901,       # WAS 0.5233
-                "pinky_mcp_flex": 0.0,      # right_pinky_mcp ref=0.0000
-                "pinky_pip": 0.0,           # right_pinky_pip ref=0.0000
+                "thumb_cmc_flex": 0.0,
+                "thumb_cmc_abd": 0.2,
+                "thumb_mcp": 0.2,
+                "thumb_ip": 0.2,
+                "index_mcp_abd": 0.0,
+                "index_mcp_flex": 0.0,
+                "index_pip": 0.0,
+                "middle_mcp_abd": 0.0,
+                "middle_mcp_flex": 0.0,
+                "middle_pip": 0.0,
+                "ring_mcp_abd": 0.0,
+                "ring_mcp_flex": 0.0,
+                "ring_pip": 0.0,
+                "pinky_mcp_abd": 0.0,
+                "pinky_mcp_flex": 0.0,
+                "pinky_pip": 0.0,
             }
 
             # Apply offsets to joint angles
