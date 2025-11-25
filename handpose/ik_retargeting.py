@@ -32,37 +32,34 @@ ORCA_JOINT_NAMES = [
     "right_pinky_pip",
 ]
 
-# Map finger names to body names in the MJCF for IK targeting
-# We target multiple keypoints per finger for better control:
-# - MCP (metacarpophalangeal): Base of finger
-# - PIP (proximal interphalangeal): Middle joint
-# - TIP: Fingertip
+# Map finger names to frames (body or site) used for IK targeting
+# Each entry is (frame_type, frame_name)
 FINGER_TARGET_BODIES = {
     "thumb": {
-        "mcp": "right_thumb_mp",  # MCP joint
-        "pip": "right_thumb_pp",  # PIP joint (thumb has different naming)
-        "ip": "right_thumb_ip",  # IP joint (thumb only)
-        "tip": "right_thumb_dp",  # Tip
+        "mcp": ("body", "right_thumb_mp"),
+        "pip": ("body", "right_thumb_pp"),
+        "ip": ("body", "right_thumb_ip"),
+        "tip": ("site", "right_thumb_tip_site"),
     },
     "index": {
-        "mcp": "right_index_mp",
-        "pip": "right_index_pp",
-        "tip": "right_index_ip",  # IP body contains the tip
+        "mcp": ("body", "right_index_mp"),
+        "pip": ("body", "right_index_pp"),
+        "tip": ("site", "right_index_tip_site"),
     },
     "middle": {
-        "mcp": "right_middle_mp",
-        "pip": "right_middle_pp",
-        "tip": "right_middle_ip",
+        "mcp": ("body", "right_middle_mp"),
+        "pip": ("body", "right_middle_pp"),
+        "tip": ("site", "right_middle_tip_site"),
     },
     "ring": {
-        "mcp": "right_ring_mp",
-        "pip": "right_ring_pp",
-        "tip": "right_ring_ip",
+        "mcp": ("body", "right_ring_mp"),
+        "pip": ("body", "right_ring_pp"),
+        "tip": ("site", "right_ring_tip_site"),
     },
     "pinky": {
-        "mcp": "right_pinky_mp",
-        "pip": "right_pinky_pp",
-        "tip": "right_pinky_ip",
+        "mcp": ("body", "right_pinky_mp"),
+        "pip": ("body", "right_pinky_pp"),
+        "tip": ("site", "right_pinky_tip_site"),
     },
 }
 
@@ -70,7 +67,8 @@ FINGER_TARGET_BODIES = {
 MP_LANDMARK_INDICES = {
     "thumb": {
         "mcp": 2,  # THUMB_MCP
-        "pip": 3,  # THUMB_IP (MediaPipe doesn't have separate PIP for thumb)
+        "pip": 2,  # Map robot PIP to MP MCP to avoid over-folding
+        "ip": 3,  # THUMB_IP (explicit target to drive the yellow sphere)
         "tip": 4,  # THUMB_TIP
     },
     "index": {
@@ -122,6 +120,7 @@ class ORCAHandIKConfig:
     # MediaPipe to Robot coordinate mapping: [MP_X, MP_Y, MP_Z] -> [Robot_X, Robot_Y, Robot_Z]
     # Default: MP (X=Forward, Y=Normal, Z=Side) -> Robot (Z=Up, X=Side, Y=Normal)
     coord_transform: Optional[np.ndarray] = None
+    target_joint_types: tuple[str, ...] = ("tip",)
 
     def __post_init__(self) -> None:
         """Initialize default values if None."""
@@ -179,18 +178,32 @@ class ORCAHandIKRetargeting:
 
         # Create IK tasks for multiple keypoints per finger
         self.tasks = {}
+        allowed_types = set(self.config.target_joint_types)
         for finger_name, bodies in FINGER_TARGET_BODIES.items():
             finger_tasks = {}
             for joint_type, body_name in bodies.items():
+                if joint_type not in allowed_types:
+                    continue
+                frame_type, frame_name = body_name
+                obj_type = mujoco.mjtObj.mjOBJ_BODY if frame_type == "body" else mujoco.mjtObj.mjOBJ_SITE
+                if mujoco.mj_name2id(model, obj_type, frame_name) < 0:
+                    continue
                 task = mink.FrameTask(
-                    frame_name=body_name,
-                    frame_type="body",
+                    frame_name=frame_name,
+                    frame_type=frame_type,
                     position_cost=self.config.position_cost,
                     orientation_cost=self.config.orientation_cost,
                     lm_damping=self.config.damping,
                 )
                 finger_tasks[joint_type] = task
-            self.tasks[finger_name] = finger_tasks
+            if finger_tasks:
+                self.tasks[finger_name] = finger_tasks
+
+        if not self.tasks:
+            raise ValueError(
+                "No IK tasks were created. Ensure target_joint_types exist in the model "
+                "(tip tracking requires fingertip sites to be injected)."
+            )
 
         # We also need a posture task to encourage the hand to stay close to a "neutral" pose
         # when not reaching for extremes. This prevents weird internal configurations.
@@ -207,7 +220,7 @@ class ORCAHandIKRetargeting:
         """Converts normalized MediaPipe landmarks (relative to wrist) into Robot Root Frame target positions.
 
         MediaPipe landmarks are relative to the wrist (wrist is at origin).
-        We must anchor to the robot's wrist joint, not the palm center.
+        We must anchor to the robot's wrist joint.
 
         Returns:
             Dictionary mapping finger names to dictionaries of joint_type -> target position
@@ -230,10 +243,14 @@ class ORCAHandIKRetargeting:
         # Wrist joint position in world frame
         p_wrist = p_palm + wrist_offset_world
 
+        allowed_types = set(self.config.target_joint_types)
+
         for finger_name, landmark_indices in MP_LANDMARK_INDICES.items():
             finger_targets = {}
 
             for joint_type, mp_idx in landmark_indices.items():
+                if joint_type not in allowed_types:
+                    continue
                 # Vector from Wrist to joint (in MediaPipe hand frame)
                 joint_pos = landmarks_hand_frame[mp_idx]
                 rel_vec = joint_pos - wrist_pos
@@ -246,7 +263,8 @@ class ORCAHandIKRetargeting:
                 target_pos = p_wrist + scaled_vec
                 finger_targets[joint_type] = target_pos
 
-            targets[finger_name] = finger_targets
+            if finger_targets:
+                targets[finger_name] = finger_targets
 
         return targets
 

@@ -15,8 +15,8 @@ import mujoco.viewer
 import numpy as np
 from askin import KeyboardController
 
-from handpose import HandTracker, ORCAHandIKRetargeting
-from handpose.ik_retargeting import FINGER_TARGET_BODIES, ORCAHandIKConfig
+from handpose import HandPose, HandTracker, ORCAHandIKRetargeting
+from handpose.ik_retargeting import FINGER_TARGET_BODIES, MP_LANDMARK_INDICES, ORCAHandIKConfig
 
 
 class Flag(Protocol):
@@ -80,7 +80,7 @@ def inject_target_bodies(mjcf_path: Path) -> str:
     }
 
     for finger, joints in FINGER_TARGET_BODIES.items():
-        for joint_type, body_name in joints.items():
+        for joint_type in joints.keys():
             body = ET.SubElement(worldbody, "body")
             body.set("name", f"target_{finger}_{joint_type}")
             body.set("mocap", "true")
@@ -94,7 +94,66 @@ def inject_target_bodies(mjcf_path: Path) -> str:
             geom.set("contype", "0")  # No collision
             geom.set("conaffinity", "0")
 
+    tip_site_specs = {
+        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.018])),
+        "index": ("right_index_ip", np.array([0.0, 0.0, 0.020])),
+        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.022])),
+        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.021])),
+        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.018])),
+    }
+
+    for finger, (parent_body, offset) in tip_site_specs.items():
+        body_elem = root.find(f".//body[@name='{parent_body}']")
+        if body_elem is None:
+            continue
+        site_name = f"right_{finger}_tip_site"
+        if body_elem.find(f"./site[@name='{site_name}']") is not None:
+            continue
+        site = ET.SubElement(body_elem, "site")
+        site.set("name", site_name)
+        site.set("pos", " ".join(f"{value:.5f}" for value in offset))
+        site.set("size", "0.0025")
+        site.set("rgba", "1 0.6 0.2 0.8")
+
     return ET.tostring(root, encoding="unicode")
+
+
+def _build_mp_label_lookup(target_joint_types: set[str]) -> dict[int, list[str]]:
+    """Map MediaPipe landmark indices to ORCA joint labels."""
+    mp_to_orca: dict[int, list[str]] = {}
+    for finger, mp_mapping in MP_LANDMARK_INDICES.items():
+        for joint_type, mp_idx in mp_mapping.items():
+            if joint_type not in target_joint_types:
+                continue
+            labels = mp_to_orca.setdefault(mp_idx, [])
+            label = f"{finger}_{joint_type}"
+            if label not in labels:
+                labels.append(label)
+    return mp_to_orca
+
+
+def annotate_orca_labels(frame: np.ndarray, pose: HandPose | None, label_lookup: dict[int, list[str]]) -> None:
+    """Overlay ORCA joint labels near the MediaPipe landmarks we target."""
+    if pose is None:
+        return
+
+    landmarks = pose.landmarks_2d
+    for mp_idx, labels in label_lookup.items():
+        if mp_idx >= landmarks.shape[0]:
+            continue
+        x, y = landmarks[mp_idx]
+        label_text = "/".join(labels)
+        text_pos = (int(x) + 5, max(12, int(y) - 5))
+        cv2.putText(
+            frame,
+            label_text,
+            text_pos,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (255, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 async def main_async(
@@ -106,6 +165,7 @@ async def main_async(
     target_body_ids: dict[str, dict[str, int]],
     frame_queue: "mp.Queue | None",
     display_flag: Flag | None,
+    label_lookup: dict[int, list[str]],
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -189,6 +249,8 @@ async def main_async(
 
             # Draw landmarks (include all detected hands)
             frame = tracker.draw_landmarks(frame, hand_poses)
+            if hand_poses:
+                annotate_orca_labels(frame, hand_poses[0], label_lookup)
 
             # Calculate FPS (every 30 frames)
             frame_count += 1
@@ -232,7 +294,22 @@ def main() -> None:
         default=0.5,
         help="Scale factor for the dual OpenCV window (e.g., 0.5 for half size).",
     )
+    parser.add_argument(
+        "--targets",
+        type=str,
+        default="tip",
+        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip.",
+    )
     args = parser.parse_args()
+
+    raw_targets = [part.strip().lower() for part in args.targets.split(",")]
+    target_joints = tuple(dict.fromkeys(jt for jt in raw_targets if jt))
+    if not target_joints:
+        target_joints = ("tip",)
+    supported_targets = {"tip", "ip", "pip", "mcp"}
+    invalid = [jt for jt in target_joints if jt not in supported_targets]
+    if invalid:
+        parser.error(f"Unsupported target joint types: {', '.join(invalid)}")
 
     # 1. Setup paths and model
     script_dir = Path(__file__).parent
@@ -258,22 +335,29 @@ def main() -> None:
     ik_config = ORCAHandIKConfig(
         scale_factor=args.scale,
         wrist_offset_palm=np.array([0.000, 0.0, -0.05]),
+        target_joint_types=target_joints,
     )
 
     ik_solver = ORCAHandIKRetargeting(model, config=ik_config)
 
+    allowed_joint_types = set(target_joints)
+
     # 5. Helper to map finger names and joint types to mocap body IDs
     target_body_ids: dict[str, dict[str, int]] = {}
     for finger, joints in FINGER_TARGET_BODIES.items():
-        target_body_ids[finger] = {}
         for joint_type in joints.keys():
+            if joint_type not in allowed_joint_types:
+                continue
+            finger_dict = target_body_ids.setdefault(finger, {})
             bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"target_{finger}_{joint_type}")
-            target_body_ids[finger][joint_type] = bid
+            finger_dict[joint_type] = bid
 
     # 6. Main Loop
     cap = cv2.VideoCapture(args.camera)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    mp_label_lookup = _build_mp_label_lookup(set(target_joints))
 
     frame_queue: "mp.Queue | None" = None
     display_flag: Flag | None = None
@@ -292,7 +376,19 @@ def main() -> None:
     print("Press 'q' to quit (or close viewer).")
 
     # Run async main loop
-    asyncio.run(main_async(model, data, cap, tracker, ik_solver, target_body_ids, frame_queue, display_flag))
+    asyncio.run(
+        main_async(
+            model,
+            data,
+            cap,
+            tracker,
+            ik_solver,
+            target_body_ids,
+            frame_queue,
+            display_flag,
+            mp_label_lookup,
+        )
+    )
 
     cap.release()
     if display_flag is not None:
