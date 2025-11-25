@@ -51,7 +51,7 @@ mjpython examples/live_demo_ik_ros2.py --model orca_hand.mjcf --scale 1.0 --rate
 Uses direct geometric mapping from hand landmarks to joint angles.
 
 ```bash
-mjpython examples/live_demo_dual.py --camera 0
+mjpython examples/live_demo.py --camera 0
 ```
 
 **Controls:**

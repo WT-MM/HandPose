@@ -2,9 +2,12 @@
 
 import argparse
 import asyncio
+import multiprocessing as mp
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from queue import Empty
+from typing import Protocol, cast
 
 import cv2
 import mujoco
@@ -14,6 +17,37 @@ from askin import KeyboardController
 
 from handpose import HandTracker, ORCAHandIKRetargeting
 from handpose.ik_retargeting import FINGER_TARGET_BODIES, ORCAHandIKConfig
+
+
+class Flag(Protocol):
+    value: int
+
+
+def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: str, scale: float) -> None:
+    """Display frames in a separate process to avoid GLFW/OpenCV conflicts."""
+    while True:
+        if not running_flag.value and frame_queue.empty():
+            break
+
+        try:
+            frame = frame_queue.get(timeout=0.05)
+        except Empty:
+            if not running_flag.value:
+                break
+            continue
+
+        display_frame = frame
+        if scale != 1.0:
+            new_size = (int(frame.shape[1] * scale), int(frame.shape[0] * scale))
+            display_frame = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+        cv2.imshow(window_name, display_frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            running_flag.value = 0
+            break
+
+    cv2.destroyAllWindows()
 
 
 def inject_target_bodies(mjcf_path: Path) -> str:
@@ -70,6 +104,8 @@ async def main_async(
     tracker: HandTracker,
     ik_solver: ORCAHandIKRetargeting,
     target_body_ids: dict[str, dict[str, int]],
+    frame_queue: "mp.Queue | None",
+    display_flag: Flag | None,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -78,6 +114,8 @@ async def main_async(
         nonlocal running
         if key == "q":
             running = False
+            if display_flag is not None:
+                display_flag.value = 0
             print("[Main] Quitting...")
 
     # Initialize keyboard controller
@@ -86,10 +124,18 @@ async def main_async(
 
     start_time = time.time()
 
+    frame_count = 0
+    fps_start_time = time.time()
+    fps: float = 0.0
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while running and viewer.is_running() and cap.isOpened():
             ret, frame = cap.read()
             if not ret:
+                break
+
+            if display_flag is not None and not display_flag.value:
+                running = False
                 break
 
             timestamp = time.time() - start_time
@@ -141,16 +187,31 @@ async def main_async(
                         if mocap_idx >= 0:
                             data.mocap_pos[mocap_idx] = final_target
 
-                # Draw landmarks on frame
-                tracker.draw_landmarks(frame, [pose])
+            # Draw landmarks (include all detected hands)
+            frame = tracker.draw_landmarks(frame, hand_poses)
+
+            # Calculate FPS (every 30 frames)
+            frame_count += 1
+            if frame_count % 30 == 0:
+                fps_end_time = time.time()
+                fps = 30.0 / (fps_end_time - fps_start_time)
+                fps_start_time = fps_end_time
+
+            # Overlay simple stats (matches dual demo style)
+            info_text = f"FPS: {fps:.1f} | Hands: {len(hand_poses)}"
+            cv2.putText(frame, info_text, (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             mujoco.mj_step(model, data)
             viewer.sync()
 
-            try:
-                cv2.imshow("Tracker", frame)
-            except (cv2.error, Exception):
-                pass
+            if frame_queue is not None and display_flag is not None:
+                if not display_flag.value:
+                    running = False
+                    break
+                try:
+                    frame_queue.put_nowait(frame.copy())
+                except Exception:
+                    pass
 
             await asyncio.sleep(0.001)
 
@@ -160,6 +221,17 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--model", type=str, default="orca_hand.mjcf")
     parser.add_argument("--scale", type=float, default=1.3, help="Robot/Human hand scale factor")
+    parser.add_argument(
+        "--dual",
+        action="store_true",
+        help="Show OpenCV camera window alongside the MuJoCo viewer.",
+    )
+    parser.add_argument(
+        "--dual-scale",
+        type=float,
+        default=0.5,
+        help="Scale factor for the dual OpenCV window (e.g., 0.5 for half size).",
+    )
     args = parser.parse_args()
 
     # 1. Setup paths and model
@@ -203,14 +275,30 @@ def main() -> None:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+    frame_queue: "mp.Queue | None" = None
+    display_flag: Flag | None = None
+    display_process: mp.Process | None = None
+    if args.dual:
+        frame_queue = mp.Queue(maxsize=2)
+        display_flag = cast(Flag, mp.Value("i", 1))
+        display_process = mp.Process(
+            target=dual_window_process,
+            args=(frame_queue, display_flag, "Hand Tracking", max(0.25, args.dual_scale)),
+            daemon=True,
+        )
+        display_process.start()
+
     print("\nStarting simulation...")
     print("Press 'q' to quit (or close viewer).")
 
     # Run async main loop
-    asyncio.run(main_async(model, data, cap, tracker, ik_solver, target_body_ids))
+    asyncio.run(main_async(model, data, cap, tracker, ik_solver, target_body_ids, frame_queue, display_flag))
 
     cap.release()
-    cv2.destroyAllWindows()
+    if display_flag is not None:
+        display_flag.value = 0
+        if display_process is not None:
+            display_process.join(timeout=1.0)
 
 
 """
