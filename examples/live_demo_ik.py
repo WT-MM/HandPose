@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -71,8 +72,6 @@ async def main_async(
     target_body_ids: dict[str, dict[str, int]],
 ) -> None:
     """Async main loop with keyboard handling."""
-    import time
-
     running = True
 
     async def key_handler(key: str) -> None:

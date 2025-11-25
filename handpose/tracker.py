@@ -1,5 +1,6 @@
 """Hand pose tracking using MediaPipe and depth information."""
 
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -103,8 +104,6 @@ class HandTracker:
 
     def _download_model(self) -> str:
         """Download the hand landmarker model if not already cached."""
-        import urllib.request
-
         # Cache model in user's home directory
         cache_dir = Path.home() / ".cache" / "handpose"
         cache_dir.mkdir(parents=True, exist_ok=True)

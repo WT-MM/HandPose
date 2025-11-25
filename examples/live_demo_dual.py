@@ -14,20 +14,17 @@ import multiprocessing as mp
 import time
 from queue import Empty
 
+import cv2
 import mujoco
 import mujoco.viewer
 import numpy as np
 from askin import KeyboardController
 
-from handpose import ORCAHandRetargeting
+from handpose import HandTracker, ORCAHandRetargeting
 
 
 def opencv_subprocess_main(frame_queue: mp.Queue, running_flag: mp.Value, camera_id: int) -> None:  # type: ignore[valid-type]
     """OpenCV subprocess - runs in regular Python."""
-    import cv2
-
-    from handpose import HandTracker, ORCAHandRetargeting
-
     # Initialize
     hand_tracker = HandTracker(max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5)
     retargeting = ORCAHandRetargeting()
