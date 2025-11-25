@@ -1,13 +1,13 @@
 """Inverse Kinematics Retargeting using Mink."""
 
-from typing import Dict
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import mink
 import mujoco
 import numpy as np
 
 # Joint names for the ORCA hand
-# Note: We exclude the wrist/root joints as we generally want to solve for fingers relative to palm
 ORCA_JOINT_NAMES = [
     # Thumb
     "right_thumb_abd",
@@ -32,27 +32,140 @@ ORCA_JOINT_NAMES = [
     "right_pinky_pip",
 ]
 
-# Map finger names to the End-Effector body names in the MJCF
-# Based on the provided MJCF, the distal bodies are named:
-FINGERTIP_BODIES = {
-    "thumb": "right_thumb_dp",
-    "index": "right_index_ip",  # ORCA index/middle/ring/pinky end at 'ip' body which contains the tip
-    "middle": "right_middle_ip",
-    "ring": "right_ring_ip",
-    "pinky": "right_pinky_ip",
+# Map finger names to body names in the MJCF for IK targeting
+# We target multiple keypoints per finger for better control:
+# - MCP (metacarpophalangeal): Base of finger
+# - PIP (proximal interphalangeal): Middle joint
+# - TIP: Fingertip
+FINGER_TARGET_BODIES = {
+    "thumb": {
+        "mcp": "right_thumb_mp",  # MCP joint
+        "pip": "right_thumb_pp",  # PIP joint (thumb has different naming)
+        "ip": "right_thumb_ip",  # IP joint (thumb only)
+        "tip": "right_thumb_dp",  # Tip
+    },
+    "index": {
+        "mcp": "right_index_mp",
+        "pip": "right_index_pp",
+        "tip": "right_index_ip",  # IP body contains the tip
+    },
+    "middle": {
+        "mcp": "right_middle_mp",
+        "pip": "right_middle_pp",
+        "tip": "right_middle_ip",
+    },
+    "ring": {
+        "mcp": "right_ring_mp",
+        "pip": "right_ring_pp",
+        "tip": "right_ring_ip",
+    },
+    "pinky": {
+        "mcp": "right_pinky_mp",
+        "pip": "right_pinky_pp",
+        "tip": "right_pinky_ip",
+    },
+}
+
+# MediaPipe landmark indices for each joint type
+MP_LANDMARK_INDICES = {
+    "thumb": {
+        "mcp": 2,  # THUMB_MCP
+        "pip": 3,  # THUMB_IP (MediaPipe doesn't have separate PIP for thumb)
+        "tip": 4,  # THUMB_TIP
+    },
+    "index": {
+        "mcp": 5,  # INDEX_FINGER_MCP
+        "pip": 6,  # INDEX_FINGER_PIP
+        "tip": 8,  # INDEX_FINGER_TIP
+    },
+    "middle": {
+        "mcp": 9,  # MIDDLE_FINGER_MCP
+        "pip": 10,  # MIDDLE_FINGER_PIP
+        "tip": 12,  # MIDDLE_FINGER_TIP
+    },
+    "ring": {
+        "mcp": 13,  # RING_FINGER_MCP
+        "pip": 14,  # RING_FINGER_PIP
+        "tip": 16,  # RING_FINGER_TIP
+    },
+    "pinky": {
+        "mcp": 17,  # PINKY_MCP
+        "pip": 18,  # PINKY_PIP
+        "tip": 20,  # PINKY_TIP
+    },
 }
 
 
+@dataclass
+class ORCAHandIKConfig:
+    """Configuration for ORCA hand IK retargeting."""
+
+    # Scale factor: Ratio of Robot Hand Size / Human Hand Size
+    scale_factor: float = 1.0
+
+    # Wrist joint offset from palm center (in palm frame, meters)
+    # Default from MJCF: right_wrist joint pos="0.002 -0.00144 -0.03872"
+    wrist_offset_palm: np.ndarray | None = None
+
+    # IK solver parameters
+    dt: float = 0.05  # Timestep for IK integration (seconds)
+    damping: float = 1e-3  # Levenberg-Marquardt damping
+    solver: str = "daqp"  # QP solver
+    ik_iterations: int = 1  # Number of IK passes to perform before returning (for better convergence)
+
+    # Task costs
+    position_cost: float = 1.0  # Cost for position tracking
+    orientation_cost: float = 0.0  # Cost for orientation tracking
+    posture_cost: float = 1e-4  # Cost for posture task (keeps hand near neutral)
+
+    # Coordinate frame transformation
+    # MediaPipe to Robot coordinate mapping: [MP_X, MP_Y, MP_Z] -> [Robot_X, Robot_Y, Robot_Z]
+    # Default: MP (X=Forward, Y=Normal, Z=Side) -> Robot (Z=Up, X=Side, Y=Normal)
+    coord_transform: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        """Initialize default values if None."""
+        if self.wrist_offset_palm is None:
+            # Default from MJCF: right_wrist joint position relative to palm
+            self.wrist_offset_palm = np.array([0.002, -0.00144, -0.03872])
+
+        if self.coord_transform is None:
+            # Default transformation matrix: MP [x, y, z] -> Robot [z, -y, x]
+            # This maps: X(Forward) -> Z(Up), Y(Normal) -> -Y(Normal), Z(Side) -> X(Side)
+            self.coord_transform = np.array(
+                [
+                    [0, 0, 1],  # Robot X = MP Z
+                    [0, -1, 0],  # Robot Y = -MP Y
+                    [1, 0, 0],  # Robot Z = MP X
+                ]
+            )
+
+    @classmethod
+    def default_config(cls) -> "ORCAHandIKConfig":
+        """Create default configuration."""
+        return cls()
+
+
 class ORCAHandIKRetargeting:
-    def __init__(self, model: mujoco.MjModel, scale_factor: float = 0.8):
-        """Args:
-        model: The MuJoCo model.
-        scale_factor: Ratio of Robot Hand Size / Human Hand Size.
-                      Adjust this to match your hand size to the robot.
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        config: ORCAHandIKConfig = ORCAHandIKConfig.default_config(),
+    ) -> None:
+        """Initialize IK retargeting for ORCA hand.
+
+        Args:
+            model: The MuJoCo model.
+            config: IK configuration. If None, uses default config.
         """
         self.model = model
         self.configuration = mink.Configuration(model)
-        self.scale_factor = scale_factor
+
+        # Initialize config
+        if config is None:
+            config = ORCAHandIKConfig.default_config()
+
+        self.config = config
 
         # Identify the qpos indices for the finger joints we want to control
         joint_indices_list = []
@@ -64,223 +177,140 @@ class ORCAHandIKRetargeting:
                 joint_indices_list.append(qpos_adr)
         self.joint_indices = np.array(joint_indices_list)
 
-        # Create End Effector tasks for each fingertip
+        # Create IK tasks for multiple keypoints per finger
         self.tasks = {}
-        for finger_name, body_name in FINGERTIP_BODIES.items():
-            # We target position only (3 degrees of freedom per finger task)
-            # This allows the finger to rotate naturally to reach the point
-            task = mink.FrameTask(
-                frame_name=body_name,
-                frame_type="body",
-                position_cost=1.0,
-                orientation_cost=0.0,
-                lm_damping=1.0,  # Levenberg-Marquardt damping for stability
-            )
-            self.tasks[finger_name] = task
+        for finger_name, bodies in FINGER_TARGET_BODIES.items():
+            finger_tasks = {}
+            for joint_type, body_name in bodies.items():
+                task = mink.FrameTask(
+                    frame_name=body_name,
+                    frame_type="body",
+                    position_cost=self.config.position_cost,
+                    orientation_cost=self.config.orientation_cost,
+                    lm_damping=self.config.damping,
+                )
+                finger_tasks[joint_type] = task
+            self.tasks[finger_name] = finger_tasks
 
         # We also need a posture task to encourage the hand to stay close to a "neutral" pose
         # when not reaching for extremes. This prevents weird internal configurations.
-        self.posture_task = mink.PostureTask(model, cost=1e-2, lm_damping=1.0)
-        # Set a reasonable neutral pose (e.g., slightly curled)
-        # You could tune these values to look natural
+        self.posture_task = mink.PostureTask(
+            model,
+            cost=self.config.posture_cost,
+            lm_damping=self.config.damping,
+        )
+
         self.target_pose = np.zeros(model.nq)
-        # Example: slightly curl fingers
-        # (This is optional, keeping it 0.0 is fine for a start)
         self.posture_task.set_target(self.target_pose)
 
-    def compute_target_positions(self, landmarks_hand_frame: np.ndarray) -> Dict[str, np.ndarray]:
-        """Converts normalized MediaPipe landmarks (relative to wrist) into
-        Robot Root Frame target positions using the scale factor.
+    def compute_target_positions(self, landmarks_hand_frame: np.ndarray) -> Dict[str, Dict[str, np.ndarray]]:
+        """Converts normalized MediaPipe landmarks (relative to wrist) into Robot Root Frame target positions.
+
+        MediaPipe landmarks are relative to the wrist (wrist is at origin).
+        We must anchor to the robot's wrist joint, not the palm center.
+
+        Returns:
+            Dictionary mapping finger names to dictionaries of joint_type -> target position
         """
-        # MediaPipe Indices
-        WRIST = 0
-        THUMB_TIP = 4
-        INDEX_TIP = 8
-        MIDDLE_TIP = 12
-        RING_TIP = 16
-        PINKY_TIP = 20
-
-        # Map MP indices to finger names
-        tips = {
-            "thumb": THUMB_TIP,
-            "index": INDEX_TIP,
-            "middle": MIDDLE_TIP,
-            "ring": RING_TIP,
-            "pinky": PINKY_TIP,
-        }
-
+        wrist = 0
         targets = {}
 
-        # Wrist position in hand frame is usually (0,0,0) or very close
-        wrist_pos = landmarks_hand_frame[WRIST]
+        # Wrist position in hand frame is (0,0,0) - MediaPipe uses wrist as origin
+        wrist_pos = landmarks_hand_frame[wrist]
 
-        for name, tip_idx in tips.items():
-            # Vector from Wrist to Tip
-            tip_pos = landmarks_hand_frame[tip_idx]
-            rel_vec = tip_pos - wrist_pos
+        # Get current transform of the palm (frame of reference)
+        t_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
+        p_palm = t_palm.translation()
+        r_palm = t_palm.rotation().as_matrix()
 
-            # Scale to robot size
-            scaled_vec = rel_vec * self.scale_factor
+        # Wrist joint offset in palm frame (configurable)
+        # Transform wrist offset from palm frame to world frame
+        wrist_offset_world = r_palm @ self.config.wrist_offset_palm
 
-            # The Robot "Wrist" (right_wrist joint) is at the origin of the 'right_palm' body.
-            # However, our IK is solving in World Frame generally.
-            # Assuming the Robot Base is at (0,0,0) or we are just setting qpos,
-            # we need to define where the "Wrist" is in the robot model.
+        # Wrist joint position in world frame
+        p_wrist = p_palm + wrist_offset_world
 
-            # In orca_hand.mjcf, 'right_palm' is offset from 'right_tower'.
-            # A simple approach:
-            # We want the fingertip *relative to the palm* to match.
-            # So Target = Robot_Palm_Pos + Scaled_Vector
+        for finger_name, landmark_indices in MP_LANDMARK_INDICES.items():
+            finger_targets = {}
 
-            # Let's assume the palm is roughly at the simulation origin or calculate it.
-            # For robustness, we will perform IK assuming the palm is fixed at its current location
-            # in the configuration.
+            for joint_type, mp_idx in landmark_indices.items():
+                # Vector from Wrist to joint (in MediaPipe hand frame)
+                joint_pos = landmarks_hand_frame[mp_idx]
+                rel_vec = joint_pos - wrist_pos
 
-            # Get current transform of the palm (frame of reference)
-            T_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
-            p_palm = T_palm.translation()
-            R_palm = T_palm.rotation().as_matrix()
+                # Scale to robot size
+                scaled_vec = rel_vec * self.config.scale_factor
 
-            # Transform the relative vector (which is in a "visual" frame aligned with MP)
-            # MediaPipe Hand Frame:
-            # +X: Side (Thumb to Pinky approx)
-            # +Y: Out of palm (Normal) ??? No, MediaPipe is weird.
-            # We did a robust basis computation in tracker.py.
-            # If `landmarks_hand_frame` comes from `tracker.py`, it's already aligned:
-            # X: Side, Y: Normal, Z: Forward (depending on implementation).
+                # Anchor to wrist joint position (not palm center!)
+                # Coordinate frame transformation will be applied in solve()
+                target_pos = p_wrist + scaled_vec
+                finger_targets[joint_type] = target_pos
 
-            # Actually, `tracker.py` `_compute_wrist_pose` defines:
-            # X: Wrist -> Palm Center (Forward)
-            # Y: Out of Palm (Normal)
-            # Z: Side (Thumb -> Pinky) -- Wait, standard MP is often different.
-
-            # Let's rely on the visual correlation.
-            # If the visualization looks rotated, we apply a rotation matrix here.
-
-            # Standard ORCA Palm:
-            # Z-axis usually points UP (along fingers) or Forward.
-            # In the MJCF: right_palm pos="...".
-
-            # Simple Identity mapping for start:
-            target_pos = p_palm + scaled_vec
-
-            targets[name] = target_pos
+            targets[finger_name] = finger_targets
 
         return targets
 
     def solve(self, landmarks_hand_frame: np.ndarray) -> np.ndarray:
         """Solves IK for the given hand landmarks.
+
         Returns the full qpos array for the robot.
         """
-        # 1. Calculate Target Positions
         targets = self.compute_target_positions(landmarks_hand_frame)
 
-        # 2. Update Tasks
-        active_tasks: list[mink.Task] = [self.posture_task]
+        # Use configurable parameters
+        solver = self.config.solver
+        dt = self.config.dt
+        damping = self.config.damping
 
-        for name, task in self.tasks.items():
-            if name in targets:
-                # We need to rotate the vector to match MuJoCo's coordinate system if needed.
-                # MediaPipe (tracker.py):
-                #   X: Forward (Wrist -> Fingers)
-                #   Y: Up/Normal (Out of palm)
-                #   Z: Side (Thumb -> Pinky) (Left handed coord system often)
+        # Perform multiple IK iterations for better convergence
+        for iteration in range(self.config.ik_iterations):
+            # Build active tasks list (posture task + finger tasks)
+            active_tasks: list[mink.Task] = [self.posture_task]
 
-                # ORCA MuJoCo:
-                #   Looking at `right_palm` body:
-                #   Usually Z is "up" (along the arm/hand length) or Y is.
-                #   Let's map:
-                #   MP X (Forward) -> Robot Z (Up/Length)
-                #   MP Z (Side)    -> Robot X (Side)
-                #   MP Y (Normal)  -> Robot Y (Normal)
+            # Get palm transform and compute wrist position (consistent with compute_target_positions)
+            # Recompute each iteration in case configuration changed
+            t_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
+            p_palm = t_palm.translation()
+            r_palm = t_palm.rotation().as_matrix()
 
-                raw_target = targets[name]
+            # Wrist joint offset in palm frame (from config)
+            wrist_offset_world = r_palm @ self.config.wrist_offset_palm
+            p_wrist = p_palm + wrist_offset_world
 
-                # Get palm center to do relative math again for rotation
-                T_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
-                p_palm = T_palm.translation()
-                rel = raw_target - p_palm
+            # Update task targets based on current wrist position
+            for finger_name, finger_targets in targets.items():
+                if finger_name not in self.tasks:
+                    continue
 
-                # Re-map axes:
-                # MP [x, y, z] -> [z, x, y] (Example guess, usually requires tuning)
-                # Let's try a direct mapping first, then rotate if the hand looks scrambled.
-                # Based on previous `retargeting.py` logic, MP frames were slightly different.
+                finger_task_dict = self.tasks[finger_name]
 
-                # Let's try:
-                # Robot Z is usually the long axis.
-                # Robot X is side.
-                # Robot Y is thickness.
+                for joint_type, raw_target in finger_targets.items():
+                    if joint_type not in finger_task_dict:
+                        continue
 
-                # Input `landmarks_hand_frame` from `tracker.py`:
-                # Row 0 (Wrist) is origin (0,0,0).
-                # Row 9 (Middle MCP) is roughly (Length, 0, 0) if X is forward.
+                    task = finger_task_dict[joint_type]
 
-                mp_vec = rel  # This is (x, y, z) from MP
+                    # Coordinate frame transformation:
+                    # raw_target is already in world frame, anchored to wrist
+                    # Get relative vector from current wrist position
+                    rel = raw_target - p_wrist
+                    mp_vec = rel  # This is (x, y, z) from MP in world frame
 
-                # Mapping MP (X-Forward, Y-Normal, Z-Side) to Robot (Z-Up/Forward, X-Side, Y-Normal)
-                # target_local = [mp_z, mp_y, mp_x] ?
-                # Let's start with a standard permutation:
-                # Robot X = MP Z (Side)
-                # Robot Y = MP -Y (Normal, maybe flipped)
-                # Robot Z = MP X (Forward)
+                    # Apply configurable coordinate transformation
+                    # Default: MP (X=Forward, Y=Normal, Z=Side) -> Robot (Z=Up, X=Side, Y=Normal)
+                    rot_vec = self.config.coord_transform @ mp_vec
+                    final_target = p_wrist + rot_vec
 
-                # Apply rotation
-                rot_vec = np.array([mp_vec[2], -mp_vec[1], mp_vec[0]])
+                    # FrameTask.set_target expects an SE3 transform
+                    target_se3 = mink.SE3.from_translation(final_target)
+                    task.set_target(target_se3)
+                    active_tasks.append(task)
 
-                final_target = p_palm + rot_vec
+            # Solve IK
+            vel = mink.solve_ik(self.configuration, active_tasks, dt, solver, damping)
 
-                # FrameTask.set_target expects an SE3 transform
-                # We only care about position, so create SE3 from translation
-                target_se3 = mink.SE3.from_translation(final_target)
-                task.set_target(target_se3)
-                active_tasks.append(task)
-
-        # 3. Solve IK
-        # Solve for velocity limits (mink uses lie algebra, solving for delta q)
-        # We perform one step of IK integration
-
-        # Note: In a live loop, we update the configuration from `data.qpos` each frame.
-        # But here we are just calculating the target qpos.
-
-        # Mink solves for dq. q_next = q_curr + dq * dt
-        # We can iterate a few times for convergence if the jump is large,
-        # but for live tracking, 1 step per frame is usually enough if FPS is high.
-
-        # solve_ik signature: (configuration, tasks, dt, solver, damping)
-        # Use smaller dt for smoother convergence (0.01-0.1 is typical)
-        # For live tracking, we want small steps to avoid overshooting
-        dt = 0.05  # 50ms timestep for smooth IK
-        
-        # Use 'daqp' if available, otherwise try other available solvers
-        solver = "daqp"
-        try:
-            vel = mink.solve_ik(
-                self.configuration, active_tasks, dt, solver, 1e-3
-            )
-        except Exception:
-            # Fallback: try to find any available solver
-            import qpsolvers
-            available = qpsolvers.available_solvers
-            if available and available[0] != "daqp":
-                solver = available[0]
-            elif len(available) > 1:
-                solver = available[1]  # Try second available solver
-            else:
-                solver = "osqp"  # Default fallback
-            try:
-                vel = mink.solve_ik(
-                    self.configuration, active_tasks, dt, solver, 1e-3
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to solve IK with any available solver. "
-                    f"Available: {qpsolvers.available_solvers}, Error: {e}"
-                ) from e
-
-        # Integrate velocity to update configuration
-        # For live tracking, we can iterate a few times for better convergence
-        # but for real-time, one step is usually sufficient
-        self.configuration.integrate_inplace(vel, dt)
+            # Integrate velocity to update configuration
+            self.configuration.integrate_inplace(vel, dt)
 
         # Return the new configuration qpos
         return self.configuration.q

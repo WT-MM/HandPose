@@ -210,7 +210,7 @@ class ORCAHandRetargeting:
 
     def _retarget_thumb(self, landmarks: np.ndarray) -> dict[str, float]:
         """Retarget thumb joints using Local Palm Coordinates."""
-        wrist = landmarks[self.WRIST]
+        # wrist = landmarks[self.WRIST]
         cmc = landmarks[self.THUMB_CMC]
         mcp = landmarks[self.THUMB_MCP]
         ip = landmarks[self.THUMB_IP]

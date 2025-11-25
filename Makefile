@@ -27,7 +27,10 @@ static-checks:
 	@mypy --install-types --non-interactive $(py-files)
 .PHONY: lint
 
-run:
+ik:
+	.venv/bin/mjpython examples/live_demo_ik.py --model orca_hand_fixed.mjcf --scale 1.0
+
+manual:
 	.venv/bin/mjpython examples/live_demo.py
 
 clean:
