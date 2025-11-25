@@ -30,7 +30,7 @@ make ik
 Uses direct geometric mapping from hand landmarks to joint angles.
 
 ```bash
-mjpython examples/live_demo_dual.py --camera 0
+mjpython examples/live_demo.py --camera 0
 ```
 
 **Controls:**

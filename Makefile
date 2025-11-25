@@ -30,8 +30,11 @@ static-checks:
 ik:
 	.venv/bin/mjpython examples/live_demo_ik.py --model orca_hand_fixed.mjcf --scale 1.0
 
+ik-dual:
+	.venv/bin/mjpython examples/live_demo_ik.py --model orca_hand_fixed.mjcf --scale 1.0 --dual
+
 manual:
-	.venv/bin/mjpython examples/live_demo.py
+	.venv/bin/mjpython examples/live_demo.py --dual
 
 clean:
 	rm -rf build/ dist/ *.egg-info

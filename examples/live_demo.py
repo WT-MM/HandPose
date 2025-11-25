@@ -4,16 +4,18 @@ Real-time hand pose tracking from camera with MuJoCo visualization of the ORCA h
 This demo tracks finger joints only (no root position/rotation).
 """
 
+import argparse
+import asyncio
+import multiprocessing as mp
 import sys
+import threading
+import time
 from pathlib import Path
+from queue import Empty
+from typing import Protocol, cast
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import argparse
-import asyncio
-import threading
-import time
 
 import cv2
 import mujoco
@@ -24,15 +26,54 @@ from askin import KeyboardController
 from handpose import HandTracker, ORCAHandRetargeting
 
 
+class Flag(Protocol):
+    value: int
+
+
+def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: str, scale: float) -> None:
+    """Display frames in a separate process to avoid GLFW/OpenCV conflicts."""
+    while True:
+        if not running_flag.value and frame_queue.empty():
+            break
+
+        try:
+            frame = frame_queue.get(timeout=0.05)
+        except Empty:
+            if not running_flag.value:
+                break
+            continue
+
+        display_frame = frame
+        if scale != 1.0:
+            new_size = (int(frame.shape[1] * scale), int(frame.shape[0] * scale))
+            display_frame = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+        cv2.imshow(window_name, display_frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            running_flag.value = 0
+            break
+
+    cv2.destroyAllWindows()
+
+
 class LiveRetargetingDemo:
     """Live hand retargeting demo with OpenCV camera feed and MuJoCo visualization."""
 
-    def __init__(self, camera_id: int = 0, model_path: str = "models/orca_hand.mjcf") -> None:
+    def __init__(
+        self,
+        camera_id: int = 0,
+        model_path: str = "models/orca_hand.mjcf",
+        dual_view: bool = False,
+        dual_scale: float = 1.0,
+    ) -> None:
         """Initialize the demo.
 
         Args:
             camera_id: Camera device ID
             model_path: Path to MuJoCo ORCA hand model
+            dual_view: If True, show the OpenCV camera window alongside MuJoCo
+            dual_scale: Scale factor for the OpenCV window when dual_view is enabled
         """
         # Initialize hand tracker
         print("Initializing hand tracker...")
@@ -67,6 +108,11 @@ class LiveRetargetingDemo:
         self.running = True
         self.current_joint_angles: np.ndarray | None = None
         self.lock = threading.Lock()
+        self.dual_view = dual_view
+        self.dual_scale = max(0.25, dual_scale)
+        self.frame_queue: "mp.Queue | None" = None
+        self.display_flag: Flag | None = None
+        self.display_process: mp.Process | None = None
 
     def _setup_joint_mapping(self) -> tuple[np.ndarray, list[str]]:
         """Setup mapping from retargeted joint names to MuJoCo qpos addresses."""
@@ -139,6 +185,8 @@ class LiveRetargetingDemo:
         """Handle keyboard input."""
         if key == "q":
             self.running = False
+            if self.dual_view and self.display_flag is not None:
+                self.display_flag.value = 0
             print("\nQuitting...")
 
     async def run(self) -> None:
@@ -146,6 +194,16 @@ class LiveRetargetingDemo:
         print("\n=== Controls ===")
         print("'q' - Quit")
         print("================\n")
+
+        if self.dual_view:
+            self.frame_queue = mp.Queue(maxsize=2)
+            self.display_flag = cast(Flag, mp.Value("i", 1))
+            self.display_process = mp.Process(
+                target=dual_window_process,
+                args=(self.frame_queue, self.display_flag, "Hand Tracking", self.dual_scale),
+                daemon=True,
+            )
+            self.display_process.start()
 
         # Initialize keyboard controller
         controller = KeyboardController(key_handler=self.key_handler, timeout=0.01)
@@ -167,6 +225,10 @@ class LiveRetargetingDemo:
                 ret, frame = self.cap.read()
                 if not ret:
                     print("Failed to read frame")
+                    break
+
+                if self.dual_view and self.display_flag is not None and not self.display_flag.value:
+                    self.running = False
                     break
 
                 timestamp = time.time()
@@ -232,15 +294,14 @@ class LiveRetargetingDemo:
                 info_text = f"FPS: {fps:.1f} | Hands: {len(hand_poses)}"
                 cv2.putText(frame, info_text, (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # Show frame (skip on macOS with mjpython due to GLFW conflicts)
-                try:
-                    cv2.imshow("Hand Tracking", frame)
-                    cv2.waitKey(1)  # Just to keep window responsive
-                except (cv2.error, Exception):
-                    # OpenCV window not available (macOS + mjpython)
-                    # Just print FPS to console occasionally
-                    if frame_count % 30 == 0:
-                        print(f"FPS: {fps:.1f} | Hands: {len(hand_poses)}")
+                if self.dual_view and self.frame_queue is not None and self.display_flag is not None:
+                    if not self.display_flag.value:
+                        self.running = False
+                        break
+                    try:
+                        self.frame_queue.put_nowait(frame.copy())
+                    except Exception:
+                        pass
 
                 await asyncio.sleep(0.001)
 
@@ -249,7 +310,10 @@ class LiveRetargetingDemo:
             await controller.stop()
             self.running = False
             self.cap.release()
-            cv2.destroyAllWindows()
+            if self.dual_view and self.display_flag is not None:
+                self.display_flag.value = 0
+                if self.display_process is not None:
+                    self.display_process.join(timeout=1.0)
             print("\nDemo finished.")
 
 
@@ -258,6 +322,17 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Live hand tracking and retargeting demo")
     parser.add_argument("--camera", type=int, default=0, help="Camera ID (default: 0)")
     parser.add_argument("--model", type=str, default="models/orca_hand.mjcf", help="Path to MuJoCo model")
+    parser.add_argument(
+        "--dual",
+        action="store_true",
+        help="Show OpenCV camera window alongside the MuJoCo viewer.",
+    )
+    parser.add_argument(
+        "--dual-scale",
+        type=float,
+        default=0.5,
+        help="Scale factor for the dual OpenCV window (e.g., 0.5 for half size).",
+    )
     args = parser.parse_args()
 
     # Resolve paths
@@ -273,7 +348,12 @@ async def main() -> None:
         return
 
     # Create and run demo
-    demo = LiveRetargetingDemo(camera_id=args.camera, model_path=str(model_path))
+    demo = LiveRetargetingDemo(
+        camera_id=args.camera,
+        model_path=str(model_path),
+        dual_view=args.dual,
+        dual_scale=args.dual_scale,
+    )
     await demo.run()
 
 
