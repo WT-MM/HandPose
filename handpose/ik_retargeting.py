@@ -1,7 +1,6 @@
 """Inverse Kinematics Retargeting using Mink."""
 
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 import mink
 import mujoco
@@ -107,19 +106,19 @@ class ORCAHandIKConfig:
 
     # IK solver parameters
     dt: float = 0.05  # Timestep for IK integration (seconds)
-    damping: float = 1e-3  # Levenberg-Marquardt damping
+    damping: float = 1e-2  # Levenberg-Marquardt damping
     solver: str = "daqp"  # QP solver
-    ik_iterations: int = 1  # Number of IK passes to perform before returning (for better convergence)
+    ik_iterations: int = 5  # Number of IK passes to perform before returning (for better convergence)
 
     # Task costs
-    position_cost: float = 1.0  # Cost for position tracking
+    position_cost: float = 3.0  # Cost for position tracking
     orientation_cost: float = 0.0  # Cost for orientation tracking
     posture_cost: float = 1e-4  # Cost for posture task (keeps hand near neutral)
 
     # Coordinate frame transformation
     # MediaPipe to Robot coordinate mapping: [MP_X, MP_Y, MP_Z] -> [Robot_X, Robot_Y, Robot_Z]
     # Default: MP (X=Forward, Y=Normal, Z=Side) -> Robot (Z=Up, X=Side, Y=Normal)
-    coord_transform: Optional[np.ndarray] = None
+    coord_transform: np.ndarray | None = None
     target_joint_types: tuple[str, ...] = ("tip",)
 
     def __post_init__(self) -> None:
@@ -216,7 +215,7 @@ class ORCAHandIKRetargeting:
         self.target_pose = np.zeros(model.nq)
         self.posture_task.set_target(self.target_pose)
 
-    def compute_target_positions(self, landmarks_hand_frame: np.ndarray) -> Dict[str, Dict[str, np.ndarray]]:
+    def compute_target_positions(self, landmarks_hand_frame: np.ndarray) -> dict[str, dict[str, np.ndarray]]:
         """Converts normalized MediaPipe landmarks (relative to wrist) into Robot Root Frame target positions.
 
         MediaPipe landmarks are relative to the wrist (wrist is at origin).
