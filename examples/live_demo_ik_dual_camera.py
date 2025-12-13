@@ -19,8 +19,11 @@ import mujoco.viewer
 import numpy as np
 from askin import KeyboardController
 
-from handpose import HandPose, HandTracker, ORCAHandIKRetargeting
+from handpose import ORCAHandIKRetargeting
 from handpose.ik_retargeting import FINGER_TARGET_BODIES, MP_LANDMARK_INDICES, ORCAHandIKConfig
+from handpose.tracker import BaseHandTracker, HandStructure
+from handpose.tracker.hamer import HaMeRTracker
+from handpose.tracker.mediapipe import MediaPipeTracker
 
 
 class Flag(Protocol):
@@ -28,6 +31,49 @@ class Flag(Protocol):
 
 
 MergeStrategy = Literal["confidence", "average", "primary", "best_hand"]
+
+
+def hand_structure_to_landmarks(structure: HandStructure) -> np.ndarray:
+    """Convert HandStructure to 21x3 landmarks array for IK (MediaPipe format).
+
+    Returns landmarks in hand frame (wrist at origin) in MediaPipe order.
+    """
+    landmarks = np.zeros((21, 3))
+
+    # Wrist (index 0)
+    landmarks[0] = structure.wrist_position
+
+    # Thumb: CMC(1), MCP(2), IP(3), tip(4)
+    landmarks[1] = structure.thumb.mcp  # CMC approximate
+    landmarks[2] = structure.thumb.mcp
+    landmarks[3] = structure.thumb.ip if structure.thumb.ip is not None else structure.thumb.mcp
+    landmarks[4] = structure.thumb.tip
+
+    # Index: MCP(5), PIP(6), DIP(7), tip(8)
+    landmarks[5] = structure.index.mcp
+    landmarks[6] = structure.index.pip if structure.index.pip is not None else structure.index.mcp
+    landmarks[7] = structure.index.dip if structure.index.dip is not None else structure.index.tip
+    landmarks[8] = structure.index.tip
+
+    # Middle: MCP(9), PIP(10), DIP(11), tip(12)
+    landmarks[9] = structure.middle.mcp
+    landmarks[10] = structure.middle.pip if structure.middle.pip is not None else structure.middle.mcp
+    landmarks[11] = structure.middle.dip if structure.middle.dip is not None else structure.middle.tip
+    landmarks[12] = structure.middle.tip
+
+    # Ring: MCP(13), PIP(14), DIP(15), tip(16)
+    landmarks[13] = structure.ring.mcp
+    landmarks[14] = structure.ring.pip if structure.ring.pip is not None else structure.ring.mcp
+    landmarks[15] = structure.ring.dip if structure.ring.dip is not None else structure.ring.tip
+    landmarks[16] = structure.ring.tip
+
+    # Pinky: MCP(17), PIP(18), DIP(19), tip(20)
+    landmarks[17] = structure.pinky.mcp
+    landmarks[18] = structure.pinky.pip if structure.pinky.pip is not None else structure.pinky.mcp
+    landmarks[19] = structure.pinky.dip if structure.pinky.dip is not None else structure.pinky.tip
+    landmarks[20] = structure.pinky.tip
+
+    return landmarks
 
 
 def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: str, scale: float) -> None:
@@ -58,79 +104,122 @@ def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: 
 
 
 def merge_hand_poses(
-    poses_cam1: list[HandPose],
-    poses_cam2: list[HandPose],
+    structures_cam1: list[HandStructure],
+    structures_cam2: list[HandStructure],
     strategy: MergeStrategy = "confidence",
-) -> HandPose | None:
+) -> HandStructure | None:
     """Merge or select hand poses from two cameras with rotation-invariant averaging."""
-
-    def _to_local(pose: HandPose) -> np.ndarray:
-        """Convert 3D landmarks to local hand frame (wrist at origin)."""
-        wrist_inv = np.linalg.inv(pose.wrist_pose)
-        ones = np.ones((pose.landmarks_3d.shape[0], 1))
-        lm_homo = np.hstack([pose.landmarks_3d, ones])
-        lm_local = (wrist_inv @ lm_homo.T).T
-        return lm_local[:, :3]
-
-    def _to_global(local_landmarks: np.ndarray, wrist_pose: np.ndarray) -> np.ndarray:
-        """Convert local hand landmarks back to world/camera frame."""
-        ones = np.ones((local_landmarks.shape[0], 1))
-        lm_homo = np.hstack([local_landmarks, ones])
-        lm_world = (wrist_pose @ lm_homo.T).T
-        return lm_world[:, :3]
-
-    if not poses_cam1 and not poses_cam2:
+    if not structures_cam1 and not structures_cam2:
         return None
 
     if strategy == "confidence":
-        all_poses = poses_cam1 + poses_cam2
-        if not all_poses:
+        all_structures = structures_cam1 + structures_cam2
+        if not all_structures:
             return None
-        return max(all_poses, key=lambda p: p.confidence)
+        return max(all_structures, key=lambda s: s.confidence)
 
     elif strategy == "average":
-        if not poses_cam1:
-            return poses_cam2[0] if poses_cam2 else None
-        if not poses_cam2:
-            return poses_cam1[0] if poses_cam1 else None
+        if not structures_cam1:
+            return structures_cam2[0] if structures_cam2 else None
+        if not structures_cam2:
+            return structures_cam1[0] if structures_cam1 else None
 
-        pose1 = poses_cam1[0]
-        pose2 = poses_cam2[0]
+        struct1 = structures_cam1[0]
+        struct2 = structures_cam2[0]
 
-        lm1_local = _to_local(pose1)
-        lm2_local = _to_local(pose2)
+        # Convert to landmarks for averaging
+        lm1 = hand_structure_to_landmarks(struct1)
+        lm2 = hand_structure_to_landmarks(struct2)
 
-        total_conf = pose1.confidence + pose2.confidence
+        total_conf = struct1.confidence + struct2.confidence
         if total_conf == 0:
             w1 = w2 = 0.5
         else:
-            w1 = pose1.confidence / total_conf
-            w2 = pose2.confidence / total_conf
+            w1 = struct1.confidence / total_conf
+            w2 = struct2.confidence / total_conf
 
-        lm_local_avg = (w1 * lm1_local) + (w2 * lm2_local)
+        lm_avg = (w1 * lm1) + (w2 * lm2)
 
-        if pose1.confidence >= pose2.confidence:
-            ref_wrist_pose = pose1.wrist_pose
-            ref_handedness = pose1.handedness
-            ref_2d = pose1.landmarks_2d
+        # Use the more confident structure as reference for wrist pose
+        if struct1.confidence >= struct2.confidence:
+            ref_wrist_pose = struct1.wrist_pose
+            ref_handedness = struct1.handedness
         else:
-            ref_wrist_pose = pose2.wrist_pose
-            ref_handedness = pose2.handedness
-            ref_2d = pose2.landmarks_2d
+            ref_wrist_pose = struct2.wrist_pose
+            ref_handedness = struct2.handedness
 
-        lm_world_merged = _to_global(lm_local_avg, ref_wrist_pose)
+        # Reconstruct HandStructure from averaged landmarks
+        # This is a simplified merge - in practice you might want more sophisticated merging
+        from handpose.tracker.base import FingerJoints
 
-        merged_pose = HandPose(
-            landmarks_2d=ref_2d,
-            landmarks_3d=lm_world_merged,
-            handedness=ref_handedness,
-            confidence=(pose1.confidence + pose2.confidence) / 2.0,
-            wrist_pose=ref_wrist_pose,
-            timestamp=(pose1.timestamp + pose2.timestamp) / 2.0,
+        # Extract finger joints from averaged landmarks
+        thumb = FingerJoints(
+            mcp=lm_avg[2],
+            ip=lm_avg[3],
+            tip=lm_avg[4],
+            mcp_local=lm_avg[2] - lm_avg[0],
+            ip_local=lm_avg[3] - lm_avg[2],
+            tip_local=lm_avg[4] - lm_avg[3],
         )
 
-        return merged_pose
+        index = FingerJoints(
+            mcp=lm_avg[5],
+            pip=lm_avg[6],
+            dip=lm_avg[7],
+            tip=lm_avg[8],
+            mcp_local=lm_avg[5] - lm_avg[0],
+            pip_local=lm_avg[6] - lm_avg[5],
+            dip_local=lm_avg[7] - lm_avg[6],
+            tip_local=lm_avg[8] - lm_avg[7],
+        )
 
+        middle = FingerJoints(
+            mcp=lm_avg[9],
+            pip=lm_avg[10],
+            dip=lm_avg[11],
+            tip=lm_avg[12],
+            mcp_local=lm_avg[9] - lm_avg[0],
+            pip_local=lm_avg[10] - lm_avg[9],
+            dip_local=lm_avg[11] - lm_avg[10],
+            tip_local=lm_avg[12] - lm_avg[11],
+        )
+
+        ring = FingerJoints(
+            mcp=lm_avg[13],
+            pip=lm_avg[14],
+            dip=lm_avg[15],
+            tip=lm_avg[16],
+            mcp_local=lm_avg[13] - lm_avg[0],
+            pip_local=lm_avg[14] - lm_avg[13],
+            dip_local=lm_avg[15] - lm_avg[14],
+            tip_local=lm_avg[16] - lm_avg[15],
+        )
+
+        pinky = FingerJoints(
+            mcp=lm_avg[17],
+            pip=lm_avg[18],
+            dip=lm_avg[19],
+            tip=lm_avg[20],
+            mcp_local=lm_avg[17] - lm_avg[0],
+            pip_local=lm_avg[18] - lm_avg[17],
+            dip_local=lm_avg[19] - lm_avg[18],
+            tip_local=lm_avg[20] - lm_avg[19],
+        )
+
+        merged_structure = HandStructure(
+            wrist_pose=ref_wrist_pose,
+            wrist_position=lm_avg[0],
+            thumb=thumb,
+            index=index,
+            middle=middle,
+            ring=ring,
+            pinky=pinky,
+            handedness=ref_handedness,
+            confidence=(struct1.confidence + struct2.confidence) / 2.0,
+            timestamp=(struct1.timestamp + struct2.timestamp) / 2.0,
+        )
+
+        return merged_structure
     else:
         raise ValueError(f"Unknown merge strategy: {strategy}")
 
@@ -213,16 +302,50 @@ def _build_mp_label_lookup(target_joint_types: set[str]) -> dict[int, list[str]]
     return mp_to_orca
 
 
-def annotate_orca_labels(frame: np.ndarray, pose: HandPose | None, label_lookup: dict[int, list[str]]) -> None:
-    """Overlay ORCA joint labels near the MediaPipe landmarks we target."""
-    if pose is None:
+def annotate_orca_labels(
+    frame: np.ndarray,
+    structure: HandStructure | None,
+    label_lookup: dict[int, list[str]],
+    camera_matrix: np.ndarray | None = None,
+) -> None:
+    """Overlay ORCA joint labels near the hand landmarks we target."""
+    if structure is None:
         return
 
-    landmarks = pose.landmarks_2d
+    # Project 3D landmarks to 2D for annotation
+    landmarks_3d = hand_structure_to_landmarks(structure)
+
+    # Transform to camera frame
+    landmarks_homo = np.hstack([landmarks_3d, np.ones((landmarks_3d.shape[0], 1))])
+    landmarks_camera = (structure.wrist_pose @ landmarks_homo.T).T[:, :3]
+
+    if camera_matrix is not None:
+        fx = camera_matrix[0, 0]
+        fy = camera_matrix[1, 1]
+        cx = camera_matrix[0, 2]
+        cy = camera_matrix[1, 2]
+        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+        for i, pt in enumerate(landmarks_camera):
+            if pt[2] > 0:
+                landmarks_2d[i] = [
+                    (pt[0] * fx / pt[2]) + cx,
+                    (pt[1] * fy / pt[2]) + cy,
+                ]
+    else:
+        # Fallback: simple projection
+        h, w = frame.shape[:2]
+        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+        for i, pt in enumerate(landmarks_camera):
+            if pt[2] > 0:
+                landmarks_2d[i] = [
+                    pt[0] / pt[2] * w / 2 + w / 2,
+                    pt[1] / pt[2] * h / 2 + h / 2,
+                ]
+
     for mp_idx, labels in label_lookup.items():
-        if mp_idx >= landmarks.shape[0]:
+        if mp_idx >= landmarks_2d.shape[0]:
             continue
-        x, y = landmarks[mp_idx]
+        x, y = landmarks_2d[mp_idx]
         label_text = "/".join(labels)
         text_pos = (int(x) + 5, max(12, int(y) - 5))
         cv2.putText(
@@ -257,14 +380,15 @@ async def main_async(
     data: mujoco.MjData,
     cap1: cv2.VideoCapture,
     cap2: cv2.VideoCapture,
-    tracker1: HandTracker,
-    tracker2: HandTracker,
+    tracker1: BaseHandTracker,
+    tracker2: BaseHandTracker,
     ik_solver: ORCAHandIKRetargeting,
     target_body_ids: dict[str, dict[str, int]],
     frame_queue: "mp.Queue | None",
     display_flag: Flag | None,
     label_lookup: dict[int, list[str]],
     merge_strategy: MergeStrategy,
+    camera_matrix: np.ndarray | None = None,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -306,35 +430,35 @@ async def main_async(
             timestamp = time.time() - start_time
 
             # Detect hands from both cameras
-            hand_poses_cam1 = tracker1.detect_hands(frame1, timestamp=timestamp)
-            hand_poses_cam2 = tracker2.detect_hands(frame2, timestamp=timestamp)
+            hand_structures_cam1 = tracker1.detect_hands(frame1, timestamp=timestamp)
+            hand_structures_cam2 = tracker2.detect_hands(frame2, timestamp=timestamp)
 
-            # Merge/decide on hand poses
-            merged_pose = merge_hand_poses(hand_poses_cam1, hand_poses_cam2, strategy=merge_strategy)
+            # Merge/decide on hand structures
+            merged_structure = merge_hand_poses(hand_structures_cam1, hand_structures_cam2, strategy=merge_strategy)
 
             # Debug output (print every 30 frames to avoid spam)
             if frame_count % 30 == 0:
-                cam1_conf = hand_poses_cam1[0].confidence if len(hand_poses_cam1) > 0 else 0.0
-                cam2_conf = hand_poses_cam2[0].confidence if len(hand_poses_cam2) > 0 else 0.0
-                merged_conf = merged_pose.confidence if merged_pose else 0.0
+                cam1_conf = hand_structures_cam1[0].confidence if len(hand_structures_cam1) > 0 else 0.0
+                cam2_conf = hand_structures_cam2[0].confidence if len(hand_structures_cam2) > 0 else 0.0
+                merged_conf = merged_structure.confidence if merged_structure else 0.0
                 print(
                     f"Frame {frame_count}: "
-                    f"Cam1: {len(hand_poses_cam1)} hands (conf: {cam1_conf:.2f}), "
-                    f"Cam2: {len(hand_poses_cam2)} hands (conf: {cam2_conf:.2f}), "
-                    f"Merged: {'Yes' if merged_pose else 'No'} (conf: {merged_conf:.2f})"
+                    f"Cam1: {len(hand_structures_cam1)} hands (conf: {cam1_conf:.2f}), "
+                    f"Cam2: {len(hand_structures_cam2)} hands (conf: {cam2_conf:.2f}), "
+                    f"Merged: {'Yes' if merged_structure else 'No'} (conf: {merged_conf:.2f})"
                 )
 
             # Draw landmarks on both camera frames
-            frame1 = tracker1.draw_landmarks(frame1, hand_poses_cam1)
-            frame2 = tracker2.draw_landmarks(frame2, hand_poses_cam2)
+            frame1 = tracker1.visualize(frame1, hand_structures_cam1, camera_matrix)
+            frame2 = tracker2.visualize(frame2, hand_structures_cam2, camera_matrix)
 
             # Add camera labels
-            draw_camera_labels(frame1, "Camera 1", len(hand_poses_cam1))
-            draw_camera_labels(frame2, "Camera 2", len(hand_poses_cam2))
+            draw_camera_labels(frame1, "Camera 1", len(hand_structures_cam1))
+            draw_camera_labels(frame2, "Camera 2", len(hand_structures_cam2))
 
-            # Process merged pose for IK
-            if merged_pose:
-                landmarks_hand = tracker1.landmarks_in_hand_frame(merged_pose)
+            # Process merged structure for IK
+            if merged_structure:
+                landmarks_hand = hand_structure_to_landmarks(merged_structure)
 
                 mujoco.mj_forward(model, data)
                 ik_solver.configuration.update(data.qpos)
@@ -371,7 +495,7 @@ async def main_async(
                         if mocap_idx >= 0:
                             data.mocap_pos[mocap_idx] = final_target
 
-                annotate_orca_labels(frame1, merged_pose, label_lookup)
+                annotate_orca_labels(frame1, merged_structure, label_lookup, camera_matrix)
 
             h1, w1 = frame1.shape[:2]
             h2, w2 = frame2.shape[:2]
@@ -392,9 +516,9 @@ async def main_async(
                 fps_start_time = fps_end_time
 
             # Overlay stats
-            cam1_count = len(hand_poses_cam1)
-            cam2_count = len(hand_poses_cam2)
-            merged_info = "Merged" if merged_pose else "None"
+            cam1_count = len(hand_structures_cam1)
+            cam2_count = len(hand_structures_cam2)
+            merged_info = "Merged" if merged_structure else "None"
             info_text = f"FPS: {fps:.1f} | Cam1: {cam1_count} | Cam2: {cam2_count} | Merged: {merged_info}"
             cv2.putText(
                 combined_frame,
@@ -406,7 +530,7 @@ async def main_async(
                 2,
             )
 
-            if merged_pose:
+            if merged_structure:
                 mujoco.mj_step(model, data)
             else:
                 mujoco.mj_forward(model, data)
@@ -462,6 +586,13 @@ def main() -> None:
         default="tip, ip",
         help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip.",
     )
+    parser.add_argument(
+        "--tracker",
+        type=str,
+        choices=["mp", "hamer"],
+        default="mp",
+        help="Hand tracker to use: 'mp' for MediaPipe or 'hamer' for HaMeR (default: mp)",
+    )
     args = parser.parse_args()
 
     raw_targets = [part.strip().lower() for part in args.targets.split(",")]
@@ -489,9 +620,19 @@ def main() -> None:
     model = mujoco.MjModel.from_xml_string(xml_string)
     data = mujoco.MjData(model)
 
-    print("Initializing Hand Trackers...")
-    tracker1 = HandTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
-    tracker2 = HandTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+    print(f"Initializing Hand Trackers ({args.tracker})...")
+    if args.tracker == "hamer":
+        try:
+            tracker1 = HaMeRTracker(smoothing_factor=0.0, conf_threshold=0.3)
+            tracker2 = HaMeRTracker(smoothing_factor=0.0, conf_threshold=0.3)
+        except ImportError as e:
+            print(f"Error: HaMeR not available: {e}")
+            print("Falling back to MediaPipe tracker")
+            tracker1 = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+            tracker2 = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+    else:
+        tracker1 = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+        tracker2 = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
 
     print("Initializing IK Solver (Mink)...")
     ik_config = ORCAHandIKConfig(
@@ -535,6 +676,9 @@ def main() -> None:
 
     mp_label_lookup = _build_mp_label_lookup(set(target_joints))
 
+    # Simple camera matrix (can be calibrated properly)
+    camera_matrix = None  # TODO: Add proper camera calibration
+
     frame_queue: "mp.Queue | None" = None
     display_flag: Flag | None = None
     display_process: mp.Process | None = None
@@ -568,6 +712,7 @@ def main() -> None:
             display_flag,
             mp_label_lookup,
             args.merge,
+            camera_matrix,
         )
     )
 
@@ -581,7 +726,7 @@ def main() -> None:
 
 """
 Run with:
-mjpython examples/live_demo_ik_dual_camera.py --camera1 0 --camera2 1 --merge average --dual
+  mjpython examples/live_demo_ik_dual_camera.py --camera1 0 --camera2 1 --merge average --dual
 """
 if __name__ == "__main__":
     main()

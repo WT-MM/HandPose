@@ -4,11 +4,11 @@ __version__ = "0.1.0"
 
 from .ik_retargeting import FINGER_TARGET_BODIES, ORCAHandIKConfig, ORCAHandIKRetargeting
 from .retargeting import ORCAHandRetargeting
-from .tracker import Handedness, HandPose, HandTracker
+from .tracker import Handedness, HandStructure, HandTracker
 
 __all__ = [
     "HandTracker",
-    "HandPose",
+    "HandStructure",
     "Handedness",
     "ORCAHandRetargeting",
     "ORCAHandIKRetargeting",

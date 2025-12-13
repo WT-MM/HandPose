@@ -15,8 +15,11 @@ import mujoco.viewer
 import numpy as np
 from askin import KeyboardController
 
-from handpose import HandPose, HandTracker, ORCAHandIKRetargeting
+from handpose import ORCAHandIKRetargeting
 from handpose.ik_retargeting import FINGER_TARGET_BODIES, MP_LANDMARK_INDICES, ORCAHandIKConfig
+from handpose.tracker import BaseHandTracker, HandStructure
+from handpose.tracker.hamer import HaMeRTracker
+from handpose.tracker.mediapipe import MediaPipeTracker
 
 
 class Flag(Protocol):
@@ -132,16 +135,93 @@ def _build_mp_label_lookup(target_joint_types: set[str]) -> dict[int, list[str]]
     return mp_to_orca
 
 
-def annotate_orca_labels(frame: np.ndarray, pose: HandPose | None, label_lookup: dict[int, list[str]]) -> None:
-    """Overlay ORCA joint labels near the MediaPipe landmarks we target."""
-    if pose is None:
+def hand_structure_to_landmarks(structure: HandStructure) -> np.ndarray:
+    """Convert HandStructure to 21x3 landmarks array for IK (MediaPipe format).
+
+    Returns landmarks in hand frame (wrist at origin) in MediaPipe order.
+    """
+    landmarks = np.zeros((21, 3))
+
+    # Wrist (index 0)
+    landmarks[0] = structure.wrist_position
+
+    # Thumb: CMC(1), MCP(2), IP(3), tip(4)
+    landmarks[1] = structure.thumb.mcp  # CMC approximate
+    landmarks[2] = structure.thumb.mcp
+    landmarks[3] = structure.thumb.ip if structure.thumb.ip is not None else structure.thumb.mcp
+    landmarks[4] = structure.thumb.tip
+
+    # Index: MCP(5), PIP(6), DIP(7), tip(8)
+    landmarks[5] = structure.index.mcp
+    landmarks[6] = structure.index.pip if structure.index.pip is not None else structure.index.mcp
+    landmarks[7] = structure.index.dip if structure.index.dip is not None else structure.index.tip
+    landmarks[8] = structure.index.tip
+
+    # Middle: MCP(9), PIP(10), DIP(11), tip(12)
+    landmarks[9] = structure.middle.mcp
+    landmarks[10] = structure.middle.pip if structure.middle.pip is not None else structure.middle.mcp
+    landmarks[11] = structure.middle.dip if structure.middle.dip is not None else structure.middle.tip
+    landmarks[12] = structure.middle.tip
+
+    # Ring: MCP(13), PIP(14), DIP(15), tip(16)
+    landmarks[13] = structure.ring.mcp
+    landmarks[14] = structure.ring.pip if structure.ring.pip is not None else structure.ring.mcp
+    landmarks[15] = structure.ring.dip if structure.ring.dip is not None else structure.ring.tip
+    landmarks[16] = structure.ring.tip
+
+    # Pinky: MCP(17), PIP(18), DIP(19), tip(20)
+    landmarks[17] = structure.pinky.mcp
+    landmarks[18] = structure.pinky.pip if structure.pinky.pip is not None else structure.pinky.mcp
+    landmarks[19] = structure.pinky.dip if structure.pinky.dip is not None else structure.pinky.tip
+    landmarks[20] = structure.pinky.tip
+
+    return landmarks
+
+
+def annotate_orca_labels(
+    frame: np.ndarray,
+    structure: HandStructure | None,
+    label_lookup: dict[int, list[str]],
+    camera_matrix: np.ndarray | None = None,
+) -> None:
+    """Overlay ORCA joint labels near the hand landmarks we target."""
+    if structure is None:
         return
 
-    landmarks = pose.landmarks_2d
+    # Project 3D landmarks to 2D for annotation
+    landmarks_3d = hand_structure_to_landmarks(structure)
+
+    # Transform to camera frame
+    landmarks_homo = np.hstack([landmarks_3d, np.ones((landmarks_3d.shape[0], 1))])
+    landmarks_camera = (structure.wrist_pose @ landmarks_homo.T).T[:, :3]
+
+    if camera_matrix is not None:
+        fx = camera_matrix[0, 0]
+        fy = camera_matrix[1, 1]
+        cx = camera_matrix[0, 2]
+        cy = camera_matrix[1, 2]
+        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+        for i, pt in enumerate(landmarks_camera):
+            if pt[2] > 0:
+                landmarks_2d[i] = [
+                    (pt[0] * fx / pt[2]) + cx,
+                    (pt[1] * fy / pt[2]) + cy,
+                ]
+    else:
+        # Fallback: simple projection
+        h, w = frame.shape[:2]
+        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+        for i, pt in enumerate(landmarks_camera):
+            if pt[2] > 0:
+                landmarks_2d[i] = [
+                    pt[0] / pt[2] * w / 2 + w / 2,
+                    pt[1] / pt[2] * h / 2 + h / 2,
+                ]
+
     for mp_idx, labels in label_lookup.items():
-        if mp_idx >= landmarks.shape[0]:
+        if mp_idx >= landmarks_2d.shape[0]:
             continue
-        x, y = landmarks[mp_idx]
+        x, y = landmarks_2d[mp_idx]
         label_text = "/".join(labels)
         text_pos = (int(x) + 5, max(12, int(y) - 5))
         cv2.putText(
@@ -160,12 +240,13 @@ async def main_async(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     cap: cv2.VideoCapture,
-    tracker: HandTracker,
+    tracker: BaseHandTracker,
     ik_solver: ORCAHandIKRetargeting,
     target_body_ids: dict[str, dict[str, int]],
     frame_queue: "mp.Queue | None",
     display_flag: Flag | None,
     label_lookup: dict[int, list[str]],
+    camera_matrix: np.ndarray | None = None,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -199,11 +280,11 @@ async def main_async(
                 break
 
             timestamp = time.time() - start_time
-            hand_poses = tracker.detect_hands(frame, timestamp=timestamp)
+            hand_structures = tracker.detect_hands(frame, timestamp=timestamp)
 
-            if hand_poses:
-                pose = hand_poses[0]
-                landmarks_hand = tracker.landmarks_in_hand_frame(pose)
+            if hand_structures:
+                structure = hand_structures[0]
+                landmarks_hand = hand_structure_to_landmarks(structure)
 
                 # --- IK SOLVE ---
                 # 1. Update the configuration object with current robot state
@@ -213,8 +294,12 @@ async def main_async(
                 # 2. Solve for new qpos
                 target_q = ik_solver.solve(landmarks_hand)
 
-                # 3. Apply to simulation
-                data.qpos[:] = target_q
+                # 3. Apply to simulation (with NaN guard)
+                if not np.any(np.isnan(target_q)) and not np.any(np.isinf(target_q)):
+                    data.qpos[:] = target_q
+                    data.qvel[:] = 0
+                else:
+                    print(f"Warning: IK produced NaNs on frame {frame_count}. Skipping update.")
 
                 # --- VISUALIZATION ---
                 # Update the mocap bodies to match the IK targets for all keypoints
@@ -248,9 +333,9 @@ async def main_async(
                             data.mocap_pos[mocap_idx] = final_target
 
             # Draw landmarks (include all detected hands)
-            frame = tracker.draw_landmarks(frame, hand_poses)
-            if hand_poses:
-                annotate_orca_labels(frame, hand_poses[0], label_lookup)
+            frame = tracker.visualize(frame, hand_structures, camera_matrix)
+            if hand_structures:
+                annotate_orca_labels(frame, hand_structures[0], label_lookup, camera_matrix)
 
             # Calculate FPS (every 30 frames)
             frame_count += 1
@@ -260,7 +345,7 @@ async def main_async(
                 fps_start_time = fps_end_time
 
             # Overlay simple stats (matches dual demo style)
-            info_text = f"FPS: {fps:.1f} | Hands: {len(hand_poses)}"
+            info_text = f"FPS: {fps:.1f} | Hands: {len(hand_structures)}"
             cv2.putText(frame, info_text, (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             mujoco.mj_step(model, data)
@@ -300,6 +385,13 @@ def main() -> None:
         default="tip",
         help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip.",
     )
+    parser.add_argument(
+        "--tracker",
+        type=str,
+        choices=["mp", "hamer"],
+        default="mp",
+        help="Hand tracker to use: 'mp' for MediaPipe or 'hamer' for HaMeR (default: mp)",
+    )
     args = parser.parse_args()
 
     raw_targets = [part.strip().lower() for part in args.targets.split(",")]
@@ -327,8 +419,11 @@ def main() -> None:
     model = mujoco.MjModel.from_xml_string(xml_string)
     data = mujoco.MjData(model)
 
-    print("Initializing Hand Tracker...")
-    tracker = HandTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+    print(f"Initializing Hand Tracker ({args.tracker})...")
+    if args.tracker == "hamer":
+        tracker = HaMeRTracker(smoothing_factor=0.0, conf_threshold=0.3)
+    else:
+        tracker = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
 
     print("Initializing IK Solver (Mink)...")
 
@@ -359,6 +454,9 @@ def main() -> None:
 
     mp_label_lookup = _build_mp_label_lookup(set(target_joints))
 
+    # Simple camera matrix (can be calibrated properly)
+    camera_matrix = None  # TODO: Add proper camera calibration
+
     frame_queue: "mp.Queue | None" = None
     display_flag: Flag | None = None
     display_process: mp.Process | None = None
@@ -387,6 +485,7 @@ def main() -> None:
             frame_queue,
             display_flag,
             mp_label_lookup,
+            camera_matrix,
         )
     )
 

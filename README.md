@@ -2,6 +2,8 @@
 
 Real-time hand tracking and retargeting to ORCA robot hand using MediaPipe and MuJoCo.
 
+If running on macOS, you need to `export PYOPENGL_PLATFORM=darwin`
+
 ## Installation
 
 ```bash
