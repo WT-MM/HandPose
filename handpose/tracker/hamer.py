@@ -5,7 +5,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-import torch
+import torch  # type: ignore[import-not-found]
 
 from .base import EPS, BaseHandTracker, FingerJoints, Handedness, HandStructure
 
@@ -39,18 +39,18 @@ class HaMeRTracker(BaseHandTracker):
         # os.environ.pop("PYOPENGL_PLATFORM", None)
 
         # Import *after* popping env var
-        import hamer.models.hamer as hamer_hamer  # this is where MeshRenderer is bound
+        import hamer.models.hamer as hamer_hamer
         from hamer.configs import CACHE_DIR_HAMER
         from hamer.models import download_models, load_hamer
 
         class _NoopMeshRenderer:
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
                 pass
 
-            def __call__(self, *args: Any, **kwargs: Any) -> None:
+            def __call__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
                 return None
 
-            def render(self, *args: Any, **kwargs: Any) -> None:
+            def render(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
                 return None
 
         # Disable renderer construction
@@ -225,7 +225,7 @@ class HaMeRTracker(BaseHandTracker):
         return batch
 
     def _extract_mano_data(
-        self, pred: Any, rgb_image: np.ndarray, camera_matrix: np.ndarray | None, h: int, w: int
+        self, pred: Any, rgb_image: np.ndarray, camera_matrix: np.ndarray | None, h: int, w: int  # noqa: ANN401
     ) -> tuple[np.ndarray | None, Any | None, np.ndarray | None, Handedness, float]:
         """Extract MANO data from prediction."""
         # Extract vertices
@@ -379,12 +379,12 @@ class HaMeRTracker(BaseHandTracker):
         x_axis = np.cross(y_axis, z_axis)
         x_axis = x_axis / (np.linalg.norm(x_axis) + EPS)
 
-        T = np.eye(4)
-        T[:3, 0] = x_axis
-        T[:3, 1] = y_axis
-        T[:3, 2] = z_axis
-        T[:3, 3] = wrist
-        return T
+        t = np.eye(4)
+        t[:3, 0] = x_axis
+        t[:3, 1] = y_axis
+        t[:3, 2] = z_axis
+        t[:3, 3] = wrist
+        return t
 
     def _mano_to_hand_structure(
         self,
@@ -518,7 +518,7 @@ class HaMeRTracker(BaseHandTracker):
             timestamp=timestamp,
         )
 
-    def _extract_mano_joints(self, vertices: np.ndarray, mano_params: Any | None = None) -> np.ndarray:
+    def _extract_mano_joints(self, vertices: np.ndarray, mano_params: Any | None = None) -> np.ndarray:  # noqa: ANN401
         """Extract joint positions from MANO vertices using joint regressor.
 
         Note: This is a fallback method. In detect_hands(), we use pred_keypoints_3d
@@ -545,13 +545,13 @@ class HaMeRTracker(BaseHandTracker):
                     vertices_tensor = torch.from_numpy(vertices).float()
 
                 if len(vertices_tensor.shape) == 2:
-                    vertices_tensor = vertices_tensor.unsqueeze(0)  # Add batch dim
+                    vertices_tensor = vertices_tensor.unsqueeze(0)  # type: ignore[attr-defined]  # Add batch dim
 
                 if torch.is_tensor(j_regressor):
                     joints = torch.matmul(j_regressor, vertices_tensor)
                     joints = joints.squeeze(0).cpu().numpy()
                 else:
-                    joints = np.matmul(j_regressor, vertices_tensor.cpu().numpy())
+                    joints = np.matmul(j_regressor, vertices_tensor.cpu().numpy())  # type: ignore[attr-defined]
                     if len(joints.shape) > 2:
                         joints = joints[0]
 

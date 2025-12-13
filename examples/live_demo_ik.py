@@ -420,6 +420,7 @@ def main() -> None:
     data = mujoco.MjData(model)
 
     print(f"Initializing Hand Tracker ({args.tracker})...")
+    tracker: BaseHandTracker
     if args.tracker == "hamer":
         tracker = HaMeRTracker(smoothing_factor=0.0, conf_threshold=0.3)
     else:

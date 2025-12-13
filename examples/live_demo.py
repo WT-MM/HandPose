@@ -240,7 +240,7 @@ class LiveRetargetingDemo:
                     hand_pose = hand_poses[0]
 
                     # Get landmarks in hand frame
-                    landmarks_hand_frame = self.hand_tracker.landmarks_in_hand_frame(hand_pose)
+                    landmarks_hand_frame = self.hand_tracker.landmarks_in_hand_frame(hand_pose)  # type: ignore[attr-defined]
 
                     # Retarget to ORCA hand
                     joint_angles_dict = self.retargeting.retarget_pose(landmarks_hand_frame, hand_pose.handedness)
@@ -281,7 +281,7 @@ class LiveRetargetingDemo:
                         self.current_joint_angles = joint_angles_array
 
                     # Draw hand landmarks
-                    frame = self.hand_tracker.draw_landmarks(frame, hand_poses)
+                    frame = self.hand_tracker.draw_landmarks(frame, hand_poses)  # type: ignore[attr-defined]
 
                 # Calculate FPS
                 frame_count += 1

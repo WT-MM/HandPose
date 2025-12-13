@@ -75,6 +75,11 @@ module = [
     "mediapipe.tasks",
     "mediapipe.tasks.python",
     "mink",
+    "hamer",
+    "hamer.models",
+    "hamer.models.hamer",
+    "hamer.configs",
+    "hamer.utils",
 ]
 ignore_missing_imports = true
 
