@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import torch
 
-from .base import BaseHandTracker, FingerJoints, Handedness, HandStructure
+from .base import EPS, BaseHandTracker, FingerJoints, Handedness, HandStructure
 
 
 class HaMeRTracker(BaseHandTracker):
@@ -68,7 +68,7 @@ class HaMeRTracker(BaseHandTracker):
         self._last_predictions: list[Any] = []  # Store raw predictions for visualization
 
         # Debug: Check if BBOX_SHAPE was set by load_hamer
-        if hasattr(self.model_cfg.MODEL, 'BBOX_SHAPE'):
+        if hasattr(self.model_cfg.MODEL, "BBOX_SHAPE"):
             self._needs_wide_input = True
         else:
             self._needs_wide_input = False
@@ -101,30 +101,32 @@ class HaMeRTracker(BaseHandTracker):
                 return structures
 
             # Extract predictions from batch output
-            batch_size = output['pred_vertices'].shape[0]
+            batch_size = output["pred_vertices"].shape[0]
 
             for n in range(batch_size):
                 # Extract data for this hand
-                vertices = output['pred_vertices'][n].detach().cpu().numpy()
-                keypoints_3d = output['pred_keypoints_3d'][n].detach().cpu().numpy()
-                keypoints_2d = output['pred_keypoints_2d'][n].detach().cpu().numpy()
-                mano_params_dict = output['pred_mano_params']
+                vertices = output["pred_vertices"][n].detach().cpu().numpy()
+                keypoints_3d = output["pred_keypoints_3d"][n].detach().cpu().numpy()
+                keypoints_2d = output["pred_keypoints_2d"][n].detach().cpu().numpy()
+                mano_params_dict = output["pred_mano_params"]
 
                 # Get handedness from batch (if available) or infer from model
-                is_right = batch.get('right', torch.ones(1, device=self.device))[n].item() if 'right' in batch else 1.0
+                is_right = batch.get("right", torch.ones(1, device=self.device))[n].item() if "right" in batch else 1.0
                 handedness: Handedness = "Right" if is_right > 0.5 else "Left"
 
                 # Get confidence (HaMeR doesn't provide explicit confidence, use a default)
                 confidence = 1.0
 
                 # Store raw prediction for visualization
-                self._last_predictions.append({
-                    'vertices': vertices,
-                    'keypoints_3d': keypoints_3d,
-                    'keypoints_2d': keypoints_2d,
-                    'mano': mano_params_dict,
-                    'is_right': is_right,
-                })
+                self._last_predictions.append(
+                    {
+                        "vertices": vertices,
+                        "keypoints_3d": keypoints_3d,
+                        "keypoints_2d": keypoints_2d,
+                        "mano": mano_params_dict,
+                        "is_right": is_right,
+                    }
+                )
 
                 # MANO outputs 21 joints (wrist + 4 per finger)
                 # Use keypoints_3d directly - it's already in the correct format
@@ -148,7 +150,7 @@ class HaMeRTracker(BaseHandTracker):
         provide a 256x256 image and let the model handle the cropping.
         """
         # Get image size from config (default 256 for ViT backbone, 224 for others)
-        img_size = getattr(self.model_cfg.MODEL, 'IMAGE_SIZE', 256)
+        img_size = getattr(self.model_cfg.MODEL, "IMAGE_SIZE", 256)
 
         # For ViT backbone, model crops [:, :, :, 32:-32] internally
         # The crop removes 32 pixels from each side of width: 256 - 64 = 192
@@ -175,10 +177,12 @@ class HaMeRTracker(BaseHandTracker):
         pad_w = target_width - new_w
         img_padded = cv2.copyMakeBorder(
             img_resized,
-            pad_h // 2, pad_h - pad_h // 2,
-            pad_w // 2, pad_w - pad_w // 2,
+            pad_h // 2,
+            pad_h - pad_h // 2,
+            pad_w // 2,
+            pad_w - pad_w // 2,
             cv2.BORDER_CONSTANT,
-            value=[0, 0, 0]
+            value=[0, 0, 0],
         )
 
         # Convert BGR to RGB (image is already RGB from detect_hands, but be safe)
@@ -187,37 +191,37 @@ class HaMeRTracker(BaseHandTracker):
             img_padded = img_padded[:, :, ::-1].copy()  # BGR to RGB, make copy
         else:
             img_padded = img_padded.copy()
-        
+
         # Convert to tensor (HWC -> CHW) - values are in [0, 255]
         img_tensor = torch.from_numpy(img_padded).permute(2, 0, 1).float()  # (3, H, W)
 
         # Get normalization from config or use defaults
         # HaMeR uses mean/std scaled by 255 (values are in [0, 255] range)
-        if hasattr(self.model_cfg.MODEL, 'IMAGE_MEAN'):
+        if hasattr(self.model_cfg.MODEL, "IMAGE_MEAN"):
             mean = torch.tensor(self.model_cfg.MODEL.IMAGE_MEAN, dtype=torch.float32).view(3, 1, 1) * 255.0
         else:
             mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1) * 255.0
 
-        if hasattr(self.model_cfg.MODEL, 'IMAGE_STD'):
+        if hasattr(self.model_cfg.MODEL, "IMAGE_STD"):
             std = torch.tensor(self.model_cfg.MODEL.IMAGE_STD, dtype=torch.float32).view(3, 1, 1) * 255.0
         else:
             std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1) * 255.0
 
         # Normalize: (img - mean) / std
         img_tensor = (img_tensor - mean) / std
-        
+
         # Add batch dimension
         img_tensor = img_tensor.unsqueeze(0)  # (1, 3, H, W)
 
         # Move to device
         img_tensor = img_tensor.to(self.device)
-        
+
         # Create batch dict (HaMeR expects this format)
         batch = {
-            'img': img_tensor,
-            'right': torch.ones(1, device=self.device, dtype=torch.float32),  # Assume right hand by default
+            "img": img_tensor,
+            "right": torch.ones(1, device=self.device, dtype=torch.float32),  # Assume right hand by default
         }
-        
+
         return batch
 
     def _extract_mano_data(
@@ -331,6 +335,57 @@ class HaMeRTracker(BaseHandTracker):
 
         return vertices, mano_params, keypoints_2d, handedness, confidence
 
+    def _compute_wrist_pose_mano16(self, joints_3d: np.ndarray, handedness: Handedness) -> np.ndarray:
+        """Compute a stable wrist pose for MANO-style 16-joint arrays.
+
+        Expected 16-joint layout (after our conversion):
+          0 wrist
+          1-3 thumb (mcp, ip, tip)
+          4-6 index (mcp, pip, dip)
+          7-9 middle (mcp, pip, dip)
+          10-12 ring (mcp, pip, dip)
+          13-15 pinky (mcp, pip, dip)
+
+        This *must not* reuse BaseHandTracker._compute_wrist_pose(), which assumes
+        MediaPipe/21-joint indexing.
+        """
+        wrist = joints_3d[0]
+        index_mcp = joints_3d[4]
+        middle_mcp = joints_3d[7]
+        ring_mcp = joints_3d[10]
+        pinky_mcp = joints_3d[13]
+
+        palm_center = (index_mcp + middle_mcp + ring_mcp + pinky_mcp) / 4.0
+
+        # x: wrist -> palm center
+        x_axis = palm_center - wrist
+        x_axis = x_axis / (np.linalg.norm(x_axis) + EPS)
+
+        # z: index -> pinky (sideways across the palm)
+        z_axis = pinky_mcp - index_mcp
+        z_axis = z_axis / (np.linalg.norm(z_axis) + EPS)
+
+        # Make left/right consistent (avoid mirrored frames)
+        if handedness == "Left":
+            z_axis = -z_axis
+
+        # y: completes right-handed frame
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis = y_axis / (np.linalg.norm(y_axis) + EPS)
+
+        # Re-orthonormalize
+        z_axis = np.cross(x_axis, y_axis)
+        z_axis = z_axis / (np.linalg.norm(z_axis) + EPS)
+        x_axis = np.cross(y_axis, z_axis)
+        x_axis = x_axis / (np.linalg.norm(x_axis) + EPS)
+
+        T = np.eye(4)
+        T[:3, 0] = x_axis
+        T[:3, 1] = y_axis
+        T[:3, 2] = z_axis
+        T[:3, 3] = wrist
+        return T
+
     def _mano_to_hand_structure(
         self,
         joints_3d: np.ndarray | None,
@@ -381,7 +436,7 @@ class HaMeRTracker(BaseHandTracker):
         joints_3d = self._apply_smoothing(joints_3d, handedness)
 
         # Compute wrist pose (need at least wrist + a few joints)
-        wrist_pose = self._compute_wrist_pose(joints_3d)
+        wrist_pose = self._compute_wrist_pose_mano16(joints_3d, handedness)
 
         # Transform to hand frame
         wrist_pose_inv = np.linalg.inv(wrist_pose)
@@ -475,7 +530,7 @@ class HaMeRTracker(BaseHandTracker):
             if isinstance(mano_params, dict):
                 j_regressor = None
                 # Try to get J_regressor from MANO model if available
-                if hasattr(self.model, 'mano') and hasattr(self.model.mano, 'J_regressor'):
+                if hasattr(self.model, "mano") and hasattr(self.model.mano, "J_regressor"):
                     j_regressor = self.model.mano.J_regressor
             elif hasattr(mano_params, "J_regressor"):
                 j_regressor = mano_params.J_regressor
@@ -579,6 +634,7 @@ class HaMeRTracker(BaseHandTracker):
         camera_matrix: np.ndarray | None = None,
     ) -> np.ndarray:
         """Simple fallback visualization using joint projection."""
+        h, w = image.shape[:2]
         annotated_image = image.copy()
 
         for structure in hand_structures:
@@ -586,7 +642,6 @@ class HaMeRTracker(BaseHandTracker):
             if camera_matrix is not None:
                 joints_2d = self._project_joints_3d_to_2d(joints_3d_camera, camera_matrix)
             else:
-                h, w = image.shape[:2]
                 joints_2d = np.zeros((21, 2))
                 for i, joint_3d in enumerate(joints_3d_camera):
                     if joint_3d[2] > 0:
