@@ -23,11 +23,55 @@ import mujoco.viewer
 import numpy as np
 from askin import KeyboardController
 
-from handpose import HandTracker, ORCAHandRetargeting
+from handpose import ORCAHandRetargeting
+from handpose.tracker import HandStructure
 
 
 class Flag(Protocol):
     value: int
+
+
+def hand_structure_to_landmarks(structure: HandStructure) -> np.ndarray:
+    """Convert HandStructure to 21x3 landmarks array for retargeting (MediaPipe format).
+
+    Returns landmarks in hand frame (wrist at origin) in MediaPipe order.
+    """
+    landmarks = np.zeros((21, 3))
+
+    # Wrist (index 0)
+    landmarks[0] = structure.wrist_position
+
+    # Thumb: CMC(1), MCP(2), IP(3), tip(4)
+    landmarks[1] = structure.thumb.mcp  # CMC approximate
+    landmarks[2] = structure.thumb.mcp
+    landmarks[3] = structure.thumb.ip if structure.thumb.ip is not None else structure.thumb.mcp
+    landmarks[4] = structure.thumb.tip
+
+    # Index: MCP(5), PIP(6), DIP(7), tip(8)
+    landmarks[5] = structure.index.mcp
+    landmarks[6] = structure.index.pip if structure.index.pip is not None else structure.index.mcp
+    landmarks[7] = structure.index.dip if structure.index.dip is not None else structure.index.tip
+    landmarks[8] = structure.index.tip
+
+    # Middle: MCP(9), PIP(10), DIP(11), tip(12)
+    landmarks[9] = structure.middle.mcp
+    landmarks[10] = structure.middle.pip if structure.middle.pip is not None else structure.middle.mcp
+    landmarks[11] = structure.middle.dip if structure.middle.dip is not None else structure.middle.tip
+    landmarks[12] = structure.middle.tip
+
+    # Ring: MCP(13), PIP(14), DIP(15), tip(16)
+    landmarks[13] = structure.ring.mcp
+    landmarks[14] = structure.ring.pip if structure.ring.pip is not None else structure.ring.mcp
+    landmarks[15] = structure.ring.dip if structure.ring.dip is not None else structure.ring.tip
+    landmarks[16] = structure.ring.tip
+
+    # Pinky: MCP(17), PIP(18), DIP(19), tip(20)
+    landmarks[17] = structure.pinky.mcp
+    landmarks[18] = structure.pinky.pip if structure.pinky.pip is not None else structure.pinky.mcp
+    landmarks[19] = structure.pinky.dip if structure.pinky.dip is not None else structure.pinky.tip
+    landmarks[20] = structure.pinky.tip
+
+    return landmarks
 
 
 def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: str, scale: float) -> None:
@@ -77,9 +121,7 @@ class LiveRetargetingDemo:
         """
         # Initialize hand tracker
         print("Initializing hand tracker...")
-        self.hand_tracker = HandTracker(
-            max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5, smoothing_factor=0.7
-        )
+        self.hand_tracker = MediaPipeTracker()
 
         # Initialize retargeting
         print("Initializing retargeting...")
@@ -240,7 +282,7 @@ class LiveRetargetingDemo:
                     hand_pose = hand_poses[0]
 
                     # Get landmarks in hand frame
-                    landmarks_hand_frame = self.hand_tracker.landmarks_in_hand_frame(hand_pose)  # type: ignore[attr-defined]
+                    landmarks_hand_frame = hand_structure_to_landmarks(hand_pose)
 
                     # Retarget to ORCA hand
                     joint_angles_dict = self.retargeting.retarget_pose(landmarks_hand_frame, hand_pose.handedness)
@@ -281,7 +323,7 @@ class LiveRetargetingDemo:
                         self.current_joint_angles = joint_angles_array
 
                     # Draw hand landmarks
-                    frame = self.hand_tracker.draw_landmarks(frame, hand_poses)  # type: ignore[attr-defined]
+                    frame = self.hand_tracker.visualize(frame, hand_poses)
 
                 # Calculate FPS
                 frame_count += 1

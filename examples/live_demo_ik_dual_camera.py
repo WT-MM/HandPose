@@ -312,35 +312,40 @@ def annotate_orca_labels(
     if structure is None:
         return
 
-    # Project 3D landmarks to 2D for annotation
-    landmarks_3d = hand_structure_to_landmarks(structure)
-
-    # Transform to camera frame
-    landmarks_homo = np.hstack([landmarks_3d, np.ones((landmarks_3d.shape[0], 1))])
-    landmarks_camera = (structure.wrist_pose @ landmarks_homo.T).T[:, :3]
-
-    if camera_matrix is not None:
-        fx = camera_matrix[0, 0]
-        fy = camera_matrix[1, 1]
-        cx = camera_matrix[0, 2]
-        cy = camera_matrix[1, 2]
-        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
-        for i, pt in enumerate(landmarks_camera):
-            if pt[2] > 0:
-                landmarks_2d[i] = [
-                    (pt[0] * fx / pt[2]) + cx,
-                    (pt[1] * fy / pt[2]) + cy,
-                ]
+    # If the tracker provided pixel-space landmarks, use them directly.
+    lm2d = getattr(structure, "landmarks_2d", None)
+    if lm2d is not None and lm2d.shape[0] >= 21:
+        landmarks_2d = lm2d
     else:
-        # Fallback: simple projection
-        h, w = frame.shape[:2]
-        landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
-        for i, pt in enumerate(landmarks_camera):
-            if pt[2] > 0:
-                landmarks_2d[i] = [
-                    pt[0] / pt[2] * w / 2 + w / 2,
-                    pt[1] / pt[2] * h / 2 + h / 2,
-                ]
+        # Project 3D landmarks to 2D for annotation
+        landmarks_3d = hand_structure_to_landmarks(structure)
+
+        # Transform to camera frame
+        landmarks_homo = np.hstack([landmarks_3d, np.ones((landmarks_3d.shape[0], 1))])
+        landmarks_camera = (structure.wrist_pose @ landmarks_homo.T).T[:, :3]
+
+        if camera_matrix is not None:
+            fx = camera_matrix[0, 0]
+            fy = camera_matrix[1, 1]
+            cx = camera_matrix[0, 2]
+            cy = camera_matrix[1, 2]
+            landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+            for i, pt in enumerate(landmarks_camera):
+                if pt[2] > 0:
+                    landmarks_2d[i] = [
+                        (pt[0] * fx / pt[2]) + cx,
+                        (pt[1] * fy / pt[2]) + cy,
+                    ]
+        else:
+            # Fallback: simple projection
+            h, w = frame.shape[:2]
+            landmarks_2d = np.zeros((landmarks_3d.shape[0], 2))
+            for i, pt in enumerate(landmarks_camera):
+                if pt[2] > 0:
+                    landmarks_2d[i] = [
+                        pt[0] / pt[2] * w / 2 + w / 2,
+                        pt[1] / pt[2] * h / 2 + h / 2,
+                    ]
 
     for mp_idx, labels in label_lookup.items():
         if mp_idx >= landmarks_2d.shape[0]:

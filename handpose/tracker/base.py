@@ -74,6 +74,10 @@ class HandStructure:
     confidence: float
     timestamp: float
 
+    # Optional 2D landmark locations in the *input image pixel coordinates*
+    # Shape: (21, 2), dtype float
+    landmarks_2d: np.ndarray | None = None
+
     def get_finger(self, finger_name: str) -> FingerJoints:
         """Get finger by name."""
         finger_map = {

@@ -10,16 +10,12 @@ from .base import (
 from .hamer import HaMeRTracker
 from .mediapipe import MediaPipeTracker
 
-# Backward compatibility: HandTracker is an alias for MediaPipeTracker
-HandTracker = MediaPipeTracker
-
 __all__ = [
     "BaseHandTracker",
     "HandStructure",
     "FingerJoints",
     "Handedness",
     "MediaPipeTracker",
-    "HandTracker",
     "EPS",
     "HaMeRTracker",
 ]

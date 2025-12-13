@@ -195,6 +195,7 @@ class MediaPipeTracker(BaseHandTracker):
                     confidence=confidence,
                     timestamp=timestamp,
                 )
+                structure.landmarks_2d = landmarks_2d.astype(np.float32)
                 structures.append(structure)
 
         return structures
@@ -209,48 +210,44 @@ class MediaPipeTracker(BaseHandTracker):
         annotated_image = image.copy()
 
         for structure in hand_structures:
-            # Project 3D joints to 2D for visualization
-            joints_3d_camera = self._structure_to_camera_frame(structure)
-            if camera_matrix is not None:
-                joints_2d = self._project_3d_to_2d(joints_3d_camera, camera_matrix)
-            else:
-                # Fallback: use approximate projection
-                h, w = image.shape[:2]
-                joints_2d = np.zeros((21, 2))
-                for i, joint_3d in enumerate(joints_3d_camera):
-                    # Simple perspective projection (assumes camera at origin)
-                    if joint_3d[2] > 0:
-                        joints_2d[i] = [
-                            joint_3d[0] / joint_3d[2] * w / 2 + w / 2,
-                            joint_3d[1] / joint_3d[2] * h / 2 + h / 2,
-                        ]
+            joints_2d = getattr(structure, "landmarks_2d", None)
+
+            if joints_2d is None:
+                # Fallback to old behavior if 2D isn't available
+                joints_3d_camera = self._structure_to_camera_frame(structure)
+                if camera_matrix is not None:
+                    joints_2d = self._project_3d_to_2d(joints_3d_camera, camera_matrix)
+                else:
+                    h, w = image.shape[:2]
+                    joints_2d = np.zeros((21, 2), dtype=np.float32)
+                    for i, joint_3d in enumerate(joints_3d_camera):
+                        if joint_3d[2] > 1e-6:
+                            joints_2d[i] = [
+                                joint_3d[0] / joint_3d[2] * w / 2 + w / 2,
+                                joint_3d[1] / joint_3d[2] * h / 2 + h / 2,
+                            ]
 
             # Draw connections
-            connections = self.mp_hands.HAND_CONNECTIONS
-            for connection in connections:
-                start_idx, end_idx = connection
-                if start_idx < len(joints_2d) and end_idx < len(joints_2d):
-                    start_point = tuple(joints_2d[start_idx].astype(int))
-                    end_point = tuple(joints_2d[end_idx].astype(int))
-                    cv2.line(annotated_image, start_point, end_point, (0, 255, 0), 2)
+            for start_idx, end_idx in self.mp_hands.HAND_CONNECTIONS:
+                p0 = tuple(joints_2d[start_idx].astype(int))
+                p1 = tuple(joints_2d[end_idx].astype(int))
+                cv2.line(annotated_image, p0, p1, (0, 255, 0), 2)
 
             # Draw keypoints
-            for joint_2d in joints_2d:
-                cv2.circle(annotated_image, (int(joint_2d[0]), int(joint_2d[1])), 4, (0, 0, 255), -1)
+            for x, y in joints_2d:
+                cv2.circle(annotated_image, (int(x), int(y)), 4, (0, 0, 255), -1)
 
-            # Add label
-            if len(joints_2d) > self.WRIST:
-                wrist_2d = joints_2d[self.WRIST].astype(int)
-                label = f"{structure.handedness} ({structure.confidence:.2f})"
-                cv2.putText(
-                    annotated_image,
-                    label,
-                    (wrist_2d[0], wrist_2d[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 255, 255),
-                    2,
-                )
+            # Label
+            wrist = joints_2d[self.WRIST].astype(int)
+            cv2.putText(
+                annotated_image,
+                f"{structure.handedness} ({structure.confidence:.2f})",
+                (wrist[0], wrist[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                2,
+            )
 
         return annotated_image
 

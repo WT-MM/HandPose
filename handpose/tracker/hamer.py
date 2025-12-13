@@ -66,6 +66,7 @@ class HaMeRTracker(BaseHandTracker):
         self.model = self.model.to(self.device)
         self.model.eval()
         self._last_predictions: list[Any] = []  # Store raw predictions for visualization
+        self._last_preprocess_meta: dict[str, float] | None = None
 
         # Debug: Check if BBOX_SHAPE was set by load_hamer
         if hasattr(self.model_cfg.MODEL, "BBOX_SHAPE"):
@@ -136,6 +137,8 @@ class HaMeRTracker(BaseHandTracker):
                 structure = self._mano_to_hand_structure(
                     joints_3d, vertices, keypoints_2d, handedness, confidence, timestamp, h, w
                 )
+                if structure is not None and keypoints_2d is not None and keypoints_2d.shape[0] >= 21:
+                    structure.landmarks_2d = self._map_kp2d_to_original(keypoints_2d, w, h)
                 if structure:
                     structures.append(structure)
 
@@ -175,15 +178,26 @@ class HaMeRTracker(BaseHandTracker):
         # Pad to target size (center padding)
         pad_h = target_height - new_h
         pad_w = target_width - new_w
+        pad_left = pad_w // 2
+        pad_top = pad_h // 2
         img_padded = cv2.copyMakeBorder(
             img_resized,
-            pad_h // 2,
-            pad_h - pad_h // 2,
-            pad_w // 2,
-            pad_w - pad_w // 2,
+            pad_top,
+            pad_h - pad_top,
+            pad_left,
+            pad_w - pad_left,
             cv2.BORDER_CONSTANT,
             value=[0, 0, 0],
         )
+
+        # Store metadata for mapping 2D keypoints back to original image
+        self._last_preprocess_meta = {
+            "scale": float(scale),
+            "pad_left": float(pad_left),
+            "pad_top": float(pad_top),
+            "target_w": float(target_width),
+            "target_h": float(target_height),
+        }
 
         # Convert BGR to RGB (image is already RGB from detect_hands, but be safe)
         # Make a copy to avoid negative strides when converting to tensor
@@ -223,6 +237,37 @@ class HaMeRTracker(BaseHandTracker):
         }
 
         return batch
+
+    def _map_kp2d_to_original(self, kp2d: np.ndarray, orig_w: int, orig_h: int) -> np.ndarray:
+        """Map HaMeR pred_keypoints_2d (usually in padded input coords or normalized) back to original image pixels."""
+        meta = self._last_preprocess_meta
+        if meta is None:
+            return kp2d
+
+        kp = kp2d.astype(np.float32).copy()
+
+        # Heuristics for coord conventions
+        kmin, kmax = float(kp.min()), float(kp.max())
+        tw, th = meta["target_w"], meta["target_h"]
+
+        if 0.0 <= kmin and kmax <= 1.5:
+            # normalized [0,1] (or close)
+            kp[:, 0] *= tw
+            kp[:, 1] *= th
+        elif -1.5 <= kmin and kmax <= 1.5:
+            # normalized [-1,1]
+            kp[:, 0] = (kp[:, 0] + 1.0) * 0.5 * tw
+            kp[:, 1] = (kp[:, 1] + 1.0) * 0.5 * th
+        # else: assume already in pixels of padded input
+
+        # Unpad then unscale back to original
+        kp[:, 0] = (kp[:, 0] - meta["pad_left"]) / meta["scale"]
+        kp[:, 1] = (kp[:, 1] - meta["pad_top"]) / meta["scale"]
+
+        # Clip to image bounds (optional but nice)
+        kp[:, 0] = np.clip(kp[:, 0], 0, orig_w - 1)
+        kp[:, 1] = np.clip(kp[:, 1], 0, orig_h - 1)
+        return kp
 
     def _extract_mano_data(
         self, pred: Any, rgb_image: np.ndarray, camera_matrix: np.ndarray | None, h: int, w: int  # noqa: ANN401
@@ -638,17 +683,20 @@ class HaMeRTracker(BaseHandTracker):
         annotated_image = image.copy()
 
         for structure in hand_structures:
-            joints_3d_camera = self._structure_to_camera_frame(structure)
-            if camera_matrix is not None:
-                joints_2d = self._project_joints_3d_to_2d(joints_3d_camera, camera_matrix)
-            else:
-                joints_2d = np.zeros((21, 2))
-                for i, joint_3d in enumerate(joints_3d_camera):
-                    if joint_3d[2] > 0:
-                        joints_2d[i] = [
-                            joint_3d[0] / joint_3d[2] * w / 2 + w / 2,
-                            joint_3d[1] / joint_3d[2] * h / 2 + h / 2,
-                        ]
+            joints_2d = getattr(structure, "landmarks_2d", None)
+            if joints_2d is None:
+                # Fallback to old behavior if 2D isn't available
+                joints_3d_camera = self._structure_to_camera_frame(structure)
+                if camera_matrix is not None:
+                    joints_2d = self._project_joints_3d_to_2d(joints_3d_camera, camera_matrix)
+                else:
+                    joints_2d = np.zeros((21, 2), dtype=np.float32)
+                    for i, joint_3d in enumerate(joints_3d_camera):
+                        if joint_3d[2] > 1e-6:
+                            joints_2d[i] = [
+                                joint_3d[0] / joint_3d[2] * w / 2 + w / 2,
+                                joint_3d[1] / joint_3d[2] * h / 2 + h / 2,
+                            ]
 
             connections = [
                 (0, 2),
