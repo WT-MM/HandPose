@@ -24,7 +24,7 @@ import numpy as np
 from askin import KeyboardController
 
 from handpose import ORCAHandRetargeting
-from handpose.tracker import HandStructure
+from handpose.tracker import HandStructure, MediaPipeTracker
 
 
 class Flag(Protocol):

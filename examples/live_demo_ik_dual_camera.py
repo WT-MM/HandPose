@@ -734,6 +734,7 @@ def main() -> None:
 """
 Run with:
   mjpython examples/live_demo_ik_dual_camera.py --camera1 0 --camera2 1 --merge average --dual
+  note that merging with hamer doesn't really work well.
 """
 if __name__ == "__main__":
     main()

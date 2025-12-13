@@ -80,6 +80,7 @@ module = [
     "hamer.models.hamer",
     "hamer.configs",
     "hamer.utils",
+    "torch",
 ]
 ignore_missing_imports = true
 

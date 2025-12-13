@@ -5,7 +5,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-import torch  # type: ignore[import-not-found]
+import torch
 
 from .base import EPS, BaseHandTracker, FingerJoints, Handedness, HandStructure
 
@@ -44,13 +44,13 @@ class HaMeRTracker(BaseHandTracker):
         from hamer.models import download_models, load_hamer
 
         class _NoopMeshRenderer:
-            def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
-            def __call__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            def __call__(self, *args: object, **kwargs: object) -> None:
                 return None
 
-            def render(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            def render(self, *args: object, **kwargs: object) -> None:
                 return None
 
         # Disable renderer construction
@@ -111,6 +111,23 @@ class HaMeRTracker(BaseHandTracker):
                 keypoints_2d = output["pred_keypoints_2d"][n].detach().cpu().numpy()
                 mano_params_dict = output["pred_mano_params"]
 
+                # Validate keypoints - check if detection is valid
+                if keypoints_3d is None or keypoints_3d.shape[0] < 21:
+                    continue
+
+                # Check for invalid predictions (all zeros, NaN, or extremely large values)
+                if np.any(np.isnan(keypoints_3d)) or np.any(np.isinf(keypoints_3d)):
+                    continue
+
+                # Check if keypoints are all zeros (no detection)
+                if np.allclose(keypoints_3d, 0.0, atol=1e-6):
+                    continue
+
+                # Check if wrist position is reasonable (not at origin or extreme values)
+                wrist_pos = keypoints_3d[0]
+                if np.linalg.norm(wrist_pos) < 1e-6 or np.linalg.norm(wrist_pos) > 10.0:
+                    continue
+
                 # Get handedness from batch (if available) or infer from model
                 is_right = batch.get("right", torch.ones(1, device=self.device))[n].item() if "right" in batch else 1.0
                 handedness: Handedness = "Right" if is_right > 0.5 else "Left"
@@ -137,10 +154,31 @@ class HaMeRTracker(BaseHandTracker):
                 structure = self._mano_to_hand_structure(
                     joints_3d, vertices, keypoints_2d, handedness, confidence, timestamp, h, w
                 )
-                if structure is not None and keypoints_2d is not None and keypoints_2d.shape[0] >= 21:
+                if structure is None:
+                    continue
+
+                # Additional validation: check if structure has reasonable values
+                if np.any(np.isnan(structure.wrist_position)) or np.any(np.isinf(structure.wrist_position)):
+                    continue
+
+                # Check if 2D landmarks are valid
+                if keypoints_2d is not None and keypoints_2d.shape[0] >= 21:
                     structure.landmarks_2d = self._map_kp2d_to_original(keypoints_2d, w, h)
-                if structure:
-                    structures.append(structure)
+                    # Validate 2D landmarks are within image bounds
+                    if (
+                        np.any(structure.landmarks_2d < 0)
+                        or np.any(structure.landmarks_2d[:, 0] > w)
+                        or np.any(structure.landmarks_2d[:, 1] > h)
+                    ):
+                        # If landmarks are way out of bounds, skip this detection
+                        if (
+                            np.any(structure.landmarks_2d < -w)
+                            or np.any(structure.landmarks_2d[:, 0] > 2 * w)
+                            or np.any(structure.landmarks_2d[:, 1] > 2 * h)
+                        ):
+                            continue
+
+                structures.append(structure)
 
         return structures
 
@@ -270,8 +308,13 @@ class HaMeRTracker(BaseHandTracker):
         return kp
 
     def _extract_mano_data(
-        self, pred: Any, rgb_image: np.ndarray, camera_matrix: np.ndarray | None, h: int, w: int  # noqa: ANN401
-    ) -> tuple[np.ndarray | None, Any | None, np.ndarray | None, Handedness, float]:
+        self,
+        pred: "dict[str, Any] | object",
+        rgb_image: np.ndarray,
+        camera_matrix: np.ndarray | None,
+        h: int,
+        w: int,
+    ) -> tuple[np.ndarray | None, "dict[str, torch.Tensor] | object | None", np.ndarray | None, Handedness, float]:
         """Extract MANO data from prediction."""
         # Extract vertices
         vertices = None
@@ -444,110 +487,101 @@ class HaMeRTracker(BaseHandTracker):
     ) -> HandStructure | None:
         """Convert MANO joints directly to HandStructure.
 
-        MANO 16 format: wrist(0), thumb(1-3), index(4-6), middle(7-9), ring(10-12), pinky(13-15)
+        Preserves all 21 joints from HaMeR, using 16-joint subset only for wrist pose stability.
         """
-        if joints_3d is None or joints_3d.shape[0] < 16:
+        if joints_3d is None or joints_3d.shape[0] < 21:
             return None
 
-        # HaMeR/MANO outputs 21 joints (wrist + 4 per finger)
-        # We need to convert to 16 joints for our structure (wrist + 3 per finger)
-        if joints_3d.shape[0] == 21:
-            # Extract: wrist(0), thumb(2-4), index(5-8), middle(9-12), ring(13-16), pinky(17-20)
-            # Convert to 16: wrist(0), thumb(2-4), index(5-7), middle(9-11), ring(13-15), pinky(17-19)
-            joints_3d = np.array(
-                [
-                    joints_3d[0],  # Wrist
-                    joints_3d[2],  # Thumb MCP
-                    joints_3d[3],  # Thumb IP
-                    joints_3d[4],  # Thumb tip
-                    joints_3d[5],  # Index MCP
-                    joints_3d[6],  # Index PIP
-                    joints_3d[7],  # Index DIP (use DIP, not tip)
-                    joints_3d[9],  # Middle MCP
-                    joints_3d[10],  # Middle PIP
-                    joints_3d[11],  # Middle DIP
-                    joints_3d[13],  # Ring MCP
-                    joints_3d[14],  # Ring PIP
-                    joints_3d[15],  # Ring DIP
-                    joints_3d[17],  # Pinky MCP
-                    joints_3d[18],  # Pinky PIP
-                    joints_3d[19],  # Pinky DIP
-                ]
-            )
-        elif joints_3d.shape[0] != 16:
-            return None
+        joints_full = joints_3d.copy()
 
-        # Apply smoothing
-        joints_3d = self._apply_smoothing(joints_3d, handedness)
+        # Build the 16-joint subset ONLY for wrist-pose stability (same as before)
+        j16 = np.array(
+            [
+                joints_full[0],  # Wrist
+                joints_full[2],  # Thumb MCP
+                joints_full[3],  # Thumb IP
+                joints_full[4],  # Thumb tip
+                joints_full[5],  # Index MCP
+                joints_full[6],  # Index PIP
+                joints_full[7],  # Index DIP
+                joints_full[9],  # Middle MCP
+                joints_full[10],  # Middle PIP
+                joints_full[11],  # Middle DIP
+                joints_full[13],  # Ring MCP
+                joints_full[14],  # Ring PIP
+                joints_full[15],  # Ring DIP
+                joints_full[17],  # Pinky MCP
+                joints_full[18],  # Pinky PIP
+                joints_full[19],  # Pinky DIP
+            ]
+        )
 
-        # Compute wrist pose (need at least wrist + a few joints)
-        wrist_pose = self._compute_wrist_pose_mano16(joints_3d, handedness)
+        # Apply smoothing to 16-joint subset for wrist pose stability
+        j16 = self._apply_smoothing(j16, handedness)
+        wrist_pose = self._compute_wrist_pose_mano16(j16, handedness)
 
-        # Transform to hand frame
+        # Transform ALL 21 joints into hand frame using that wrist_pose
         wrist_pose_inv = np.linalg.inv(wrist_pose)
-        joints_homogeneous = np.hstack([joints_3d, np.ones((len(joints_3d), 1))])
-        joints_hand_frame = (wrist_pose_inv @ joints_homogeneous.T).T[:, :3]
+        j = np.hstack([joints_full, np.ones((21, 1))])
+        joints_hand = (wrist_pose_inv @ j.T).T[:, :3]
+        wrist = joints_hand[0]
 
-        # Extract joints directly from MANO structure
-        # MANO 16: wrist(0), thumb(1-3), index(4-6), middle(7-9), ring(10-12), pinky(13-15)
-        wrist = joints_hand_frame[0]
-
-        # Thumb: joints 1-3 (MCP, IP, tip)
+        # Thumb: joints 2-4 (MCP, IP, tip)
         thumb = FingerJoints(
-            mcp=joints_hand_frame[1],
-            ip=joints_hand_frame[2],
-            tip=joints_hand_frame[3],
-            mcp_local=joints_hand_frame[1] - wrist,
-            ip_local=joints_hand_frame[2] - joints_hand_frame[1],
-            tip_local=joints_hand_frame[3] - joints_hand_frame[2],
+            mcp=joints_hand[2],
+            ip=joints_hand[3],
+            tip=joints_hand[4],
+            mcp_local=joints_hand[2] - wrist,
+            ip_local=joints_hand[3] - joints_hand[2],
+            tip_local=joints_hand[4] - joints_hand[3],
         )
 
-        # Index: joints 4-6 (MCP, PIP, DIP/tip)
+        # Index: joints 5-8 (MCP, PIP, DIP, tip)
         index = FingerJoints(
-            mcp=joints_hand_frame[4],
-            pip=joints_hand_frame[5],
-            dip=joints_hand_frame[6],
-            tip=joints_hand_frame[6],  # MANO doesn't separate DIP and tip
-            mcp_local=joints_hand_frame[4] - wrist,
-            pip_local=joints_hand_frame[5] - joints_hand_frame[4],
-            dip_local=joints_hand_frame[6] - joints_hand_frame[5],
-            tip_local=joints_hand_frame[6] - joints_hand_frame[5],  # Same as DIP
+            mcp=joints_hand[5],
+            pip=joints_hand[6],
+            dip=joints_hand[7],
+            tip=joints_hand[8],  # Real tip from HaMeR
+            mcp_local=joints_hand[5] - wrist,
+            pip_local=joints_hand[6] - joints_hand[5],
+            dip_local=joints_hand[7] - joints_hand[6],
+            tip_local=joints_hand[8] - joints_hand[7],
         )
 
-        # Middle: joints 7-9
+        # Middle: joints 9-12 (MCP, PIP, DIP, tip)
         middle = FingerJoints(
-            mcp=joints_hand_frame[7],
-            pip=joints_hand_frame[8],
-            dip=joints_hand_frame[9],
-            tip=joints_hand_frame[9],
-            mcp_local=joints_hand_frame[7] - wrist,
-            pip_local=joints_hand_frame[8] - joints_hand_frame[7],
-            dip_local=joints_hand_frame[9] - joints_hand_frame[8],
-            tip_local=joints_hand_frame[9] - joints_hand_frame[8],
+            mcp=joints_hand[9],
+            pip=joints_hand[10],
+            dip=joints_hand[11],
+            tip=joints_hand[12],  # Real tip from HaMeR
+            mcp_local=joints_hand[9] - wrist,
+            pip_local=joints_hand[10] - joints_hand[9],
+            dip_local=joints_hand[11] - joints_hand[10],
+            tip_local=joints_hand[12] - joints_hand[11],
         )
 
-        # Ring: joints 10-12
+        # Ring: joints 13-16 (MCP, PIP, DIP, tip)
         ring = FingerJoints(
-            mcp=joints_hand_frame[10],
-            pip=joints_hand_frame[11],
-            dip=joints_hand_frame[12],
-            tip=joints_hand_frame[12],
-            mcp_local=joints_hand_frame[10] - wrist,
-            pip_local=joints_hand_frame[11] - joints_hand_frame[10],
-            dip_local=joints_hand_frame[12] - joints_hand_frame[11],
-            tip_local=joints_hand_frame[12] - joints_hand_frame[11],
+            mcp=joints_hand[13],
+            pip=joints_hand[14],
+            dip=joints_hand[15],
+            tip=joints_hand[16],  # Real tip from HaMeR
+            mcp_local=joints_hand[13] - wrist,
+            pip_local=joints_hand[14] - joints_hand[13],
+            dip_local=joints_hand[15] - joints_hand[14],
+            tip_local=joints_hand[16] - joints_hand[15],
         )
 
-        # Pinky: joints 13-15
+        # Pinky: joints 17-20 (MCP, PIP, DIP, tip)
         pinky = FingerJoints(
-            mcp=joints_hand_frame[13],
-            pip=joints_hand_frame[14],
-            dip=joints_hand_frame[15],
-            tip=joints_hand_frame[15],
-            mcp_local=joints_hand_frame[13] - wrist,
-            pip_local=joints_hand_frame[14] - joints_hand_frame[13],
-            dip_local=joints_hand_frame[15] - joints_hand_frame[14],
-            tip_local=joints_hand_frame[15] - joints_hand_frame[14],
+            mcp=joints_hand[17],
+            pip=joints_hand[18],
+            dip=joints_hand[19],
+            tip=joints_hand[20],  # Real tip from HaMeR
+            mcp_local=joints_hand[17] - wrist,
+            pip_local=joints_hand[18] - joints_hand[17],
+            dip_local=joints_hand[19] - joints_hand[18],
+            tip_local=joints_hand[20] - joints_hand[19],
         )
 
         return HandStructure(
@@ -563,7 +597,9 @@ class HaMeRTracker(BaseHandTracker):
             timestamp=timestamp,
         )
 
-    def _extract_mano_joints(self, vertices: np.ndarray, mano_params: Any | None = None) -> np.ndarray:  # noqa: ANN401
+    def _extract_mano_joints(
+        self, vertices: np.ndarray, mano_params: "dict[str, torch.Tensor] | object | None" = None
+    ) -> np.ndarray:
         """Extract joint positions from MANO vertices using joint regressor.
 
         Note: This is a fallback method. In detect_hands(), we use pred_keypoints_3d
@@ -585,18 +621,18 @@ class HaMeRTracker(BaseHandTracker):
             if j_regressor is not None:
                 # Use MANO's joint regressor to get joints from vertices
                 if torch.is_tensor(vertices):
-                    vertices_tensor = vertices
+                    vertices_tensor: torch.Tensor = vertices
                 else:
                     vertices_tensor = torch.from_numpy(vertices).float()
 
                 if len(vertices_tensor.shape) == 2:
-                    vertices_tensor = vertices_tensor.unsqueeze(0)  # type: ignore[attr-defined]  # Add batch dim
+                    vertices_tensor = vertices_tensor.unsqueeze(0)  # Add batch dim
 
                 if torch.is_tensor(j_regressor):
                     joints = torch.matmul(j_regressor, vertices_tensor)
                     joints = joints.squeeze(0).cpu().numpy()
                 else:
-                    joints = np.matmul(j_regressor, vertices_tensor.cpu().numpy())  # type: ignore[attr-defined]
+                    joints = np.matmul(j_regressor, vertices_tensor.cpu().numpy())
                     if len(joints.shape) > 2:
                         joints = joints[0]
 
