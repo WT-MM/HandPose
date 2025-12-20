@@ -289,7 +289,6 @@ async def main_async(
 
             if hand_structures:
                 structure = hand_structures[0]
-                landmarks_hand = hand_structure_to_landmarks(structure)
 
                 # --- IK SOLVE ---
                 # 1. Update the configuration object with current robot state
@@ -297,7 +296,7 @@ async def main_async(
                 ik_solver.configuration.update(data.qpos)
 
                 # 2. Solve for new qpos
-                target_q = ik_solver.solve(landmarks_hand)
+                target_q = ik_solver.solve(structure)
 
                 # 3. Apply to simulation (with NaN guard)
                 if not np.any(np.isnan(target_q)) and not np.any(np.isinf(target_q)):
@@ -308,7 +307,7 @@ async def main_async(
 
                 # --- VISUALIZATION ---
                 # Update the mocap bodies to match the IK targets for all keypoints
-                targets = ik_solver.compute_target_positions(landmarks_hand)
+                targets = ik_solver.compute_target_positions(structure)
 
                 # Get palm position and compute wrist position (consistent with IK solver)
                 palm_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_palm")

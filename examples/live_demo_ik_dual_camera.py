@@ -463,11 +463,9 @@ async def main_async(
 
             # Process merged structure for IK
             if merged_structure:
-                landmarks_hand = hand_structure_to_landmarks(merged_structure)
-
                 mujoco.mj_forward(model, data)
                 ik_solver.configuration.update(data.qpos)
-                target_q = ik_solver.solve(landmarks_hand)
+                target_q = ik_solver.solve(merged_structure)
 
                 if not np.any(np.isnan(target_q)) and not np.any(np.isinf(target_q)):
                     data.qpos[:] = target_q
@@ -475,7 +473,7 @@ async def main_async(
                 else:
                     print(f"Warning: IK produced NaNs on frame {frame_count}. Skipping update.")
 
-                targets = ik_solver.compute_target_positions(landmarks_hand)
+                targets = ik_solver.compute_target_positions(merged_structure)
                 palm_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_palm")
                 p_palm = data.xpos[palm_id]
                 r_palm = data.xmat[palm_id].reshape(3, 3)

@@ -6,6 +6,8 @@ import mink
 import mujoco
 import numpy as np
 
+from handpose.tracker.base import HandStructure
+
 # Joint names for the ORCA hand
 ORCA_JOINT_NAMES = [
     # Thumb
@@ -215,15 +217,73 @@ class ORCAHandIKRetargeting:
         self.target_pose = np.zeros(model.nq)
         self.posture_task.set_target(self.target_pose)
 
-    def compute_target_positions(self, landmarks_hand_frame: np.ndarray) -> dict[str, dict[str, np.ndarray]]:
-        """Converts normalized MediaPipe landmarks (relative to wrist) into Robot Root Frame target positions.
+    def _hand_structure_to_landmarks(self, hand_structure: HandStructure) -> np.ndarray:
+        """Convert HandStructure to 21x3 landmarks array (MediaPipe format).
 
-        MediaPipe landmarks are relative to the wrist (wrist is at origin).
-        We must anchor to the robot's wrist joint.
+        Args:
+            hand_structure: HandStructure from tracker
+
+        Returns:
+            landmarks_hand_frame: 21x3 array of landmarks in hand frame (wrist at origin)
+        """
+        landmarks = np.zeros((21, 3))
+
+        # Wrist (index 0)
+        landmarks[0] = hand_structure.wrist_position
+
+        # Thumb: CMC(1), MCP(2), IP(3), tip(4)
+        landmarks[1] = hand_structure.thumb.mcp  # CMC approximate
+        landmarks[2] = hand_structure.thumb.mcp
+        landmarks[3] = hand_structure.thumb.ip if hand_structure.thumb.ip is not None else hand_structure.thumb.mcp
+        landmarks[4] = hand_structure.thumb.tip
+
+        # Index: MCP(5), PIP(6), DIP(7), tip(8)
+        landmarks[5] = hand_structure.index.mcp
+        landmarks[6] = hand_structure.index.pip if hand_structure.index.pip is not None else hand_structure.index.mcp
+        landmarks[7] = hand_structure.index.dip if hand_structure.index.dip is not None else hand_structure.index.tip
+        landmarks[8] = hand_structure.index.tip
+
+        # Middle: MCP(9), PIP(10), DIP(11), tip(12)
+        landmarks[9] = hand_structure.middle.mcp
+        landmarks[10] = (
+            hand_structure.middle.pip if hand_structure.middle.pip is not None else hand_structure.middle.mcp
+        )
+        landmarks[11] = (
+            hand_structure.middle.dip if hand_structure.middle.dip is not None else hand_structure.middle.tip
+        )
+        landmarks[12] = hand_structure.middle.tip
+
+        # Ring: MCP(13), PIP(14), DIP(15), tip(16)
+        landmarks[13] = hand_structure.ring.mcp
+        landmarks[14] = hand_structure.ring.pip if hand_structure.ring.pip is not None else hand_structure.ring.mcp
+        landmarks[15] = hand_structure.ring.dip if hand_structure.ring.dip is not None else hand_structure.ring.tip
+        landmarks[16] = hand_structure.ring.tip
+
+        # Pinky: MCP(17), PIP(18), DIP(19), tip(20)
+        landmarks[17] = hand_structure.pinky.mcp
+        landmarks[18] = hand_structure.pinky.pip if hand_structure.pinky.pip is not None else hand_structure.pinky.mcp
+        landmarks[19] = hand_structure.pinky.dip if hand_structure.pinky.dip is not None else hand_structure.pinky.tip
+        landmarks[20] = hand_structure.pinky.tip
+
+        return landmarks
+
+    def compute_target_positions(self, hand_input: HandStructure | np.ndarray) -> dict[str, dict[str, np.ndarray]]:
+        """Converts hand input (HandStructure or landmarks array) into Robot Root Frame target positions.
+
+        Args:
+            hand_input: Either a HandStructure from tracker or a 21x3 numpy array of landmarks
+                in hand frame (wrist at origin, MediaPipe format).
 
         Returns:
             Dictionary mapping finger names to dictionaries of joint_type -> target position
         """
+        # Convert HandStructure to landmarks array if needed
+
+        if isinstance(hand_input, HandStructure):
+            landmarks_hand_frame = self._hand_structure_to_landmarks(hand_input)
+        else:
+            landmarks_hand_frame = hand_input
+
         wrist = 0
         targets = {}
 
@@ -267,12 +327,17 @@ class ORCAHandIKRetargeting:
 
         return targets
 
-    def solve(self, landmarks_hand_frame: np.ndarray) -> np.ndarray:
-        """Solves IK for the given hand landmarks.
+    def solve(self, hand_input: HandStructure | np.ndarray) -> np.ndarray:
+        """Solves IK for the given hand input.
 
-        Returns the full qpos array for the robot.
+        Args:
+            hand_input: Either a HandStructure from tracker or a 21x3 numpy array of landmarks
+                in hand frame (wrist at origin, MediaPipe format).
+
+        Returns:
+            The full qpos array for the robot.
         """
-        targets = self.compute_target_positions(landmarks_hand_frame)
+        targets = self.compute_target_positions(hand_input)
 
         # Use configurable parameters
         solver = self.config.solver
