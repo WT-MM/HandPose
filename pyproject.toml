@@ -81,6 +81,10 @@ module = [
     "hamer.configs",
     "hamer.utils",
     "torch",
+    "rclpy",
+    'sensor_msgs',
+    'rclpy.*',
+    'sensor_msgs.*',
 ]
 ignore_missing_imports = true
 

@@ -1,4 +1,4 @@
-# HandPose
+w# HandPose
 
 Real-time hand tracking and retargeting to ORCA robot hand using MediaPipe and MuJoCo.
 
