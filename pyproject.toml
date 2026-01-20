@@ -85,6 +85,7 @@ module = [
     'sensor_msgs',
     'rclpy.*',
     'sensor_msgs.*',
+    'h5py',
 ]
 ignore_missing_imports = true
 
