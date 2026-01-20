@@ -22,6 +22,7 @@ from askin import KeyboardController
 from handpose import ORCAHandIKRetargeting
 from handpose.ik_retargeting import FINGER_TARGET_BODIES, MP_LANDMARK_INDICES, ORCAHandIKConfig
 from handpose.tracker import BaseHandTracker, HandStructure
+from handpose.tracker.base import FingerJoints
 from handpose.tracker.hamer import HaMeRTracker
 from handpose.tracker.mediapipe import MediaPipeTracker
 
@@ -149,8 +150,7 @@ def merge_hand_poses(
             ref_handedness = struct2.handedness
 
         # Reconstruct HandStructure from averaged landmarks
-        # This is a simplified merge - in practice you might want more sophisticated merging
-        from handpose.tracker.base import FingerJoints
+        # TODO: implement better merging strategy
 
         # Extract finger joints from averaged landmarks
         thumb = FingerJoints(

@@ -11,6 +11,7 @@ REF_OFFSETS. The tactile_dex simulation applies offsets internally.
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import cv2
@@ -268,8 +269,6 @@ def main() -> None:
         print("\nShutting down...")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
-
         traceback.print_exc()
     finally:
         rclpy.shutdown()

@@ -4,9 +4,14 @@ import os
 from typing import Any
 
 import cv2
+import hamer.models.hamer as hamer_hamer
 import numpy as np
 import torch
+from hamer.configs import CACHE_DIR_HAMER
+from hamer.models import download_models, load_hamer
 
+# IMPORTANT: pyrender OffscreenRenderer wants this key to be ABSENT
+# os.environ.pop("PYOPENGL_PLATFORM", None)
 from .base import EPS, BaseHandTracker, FingerJoints, Handedness, HandStructure
 
 
@@ -34,14 +39,6 @@ class HaMeRTracker(BaseHandTracker):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.conf_threshold = conf_threshold
-
-        # IMPORTANT: pyrender OffscreenRenderer wants this key to be ABSENT
-        # os.environ.pop("PYOPENGL_PLATFORM", None)
-
-        # Import *after* popping env var
-        import hamer.models.hamer as hamer_hamer
-        from hamer.configs import CACHE_DIR_HAMER
-        from hamer.models import download_models, load_hamer
 
         class _NoopMeshRenderer:
             def __init__(self, *args: object, **kwargs: object) -> None:
