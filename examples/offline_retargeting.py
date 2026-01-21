@@ -2,10 +2,12 @@
 
 import argparse
 import asyncio
+import logging
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import colorlogging
 import cv2
 import h5py
 import mujoco
@@ -17,6 +19,8 @@ from handpose.ik_retargeting import ORCA_JOINT_NAMES, ORCAHandIKConfig
 from handpose.tracker import BaseHandTracker
 from handpose.tracker.hamer import HaMeRTracker
 from handpose.tracker.mediapipe import MediaPipeTracker
+
+logger = logging.getLogger(__name__)
 
 
 def load_mjcf_model(mjcf_path: Path) -> str:
@@ -96,15 +100,15 @@ async def main_loop(
         nonlocal running
         if key == "q":
             running = False
-            print("[Main] Quitting...")
+            logger.info("Quitting...")
 
     # Initialize keyboard controller
     controller = KeyboardController(key_handler=key_handler, timeout=0.01)
     await controller.start()
 
-    print(f"Recording to {output_path}")
-    print(f"Target frequency: {target_fps:.1f} Hz")
-    print("Press 'q' to quit and save.")
+    logger.info("Recording to %s", output_path)
+    logger.info("Target frequency: %f Hz", target_fps)
+    logger.info("Press 'q' to quit and save.")
 
     try:
         with h5py.File(output_path, "w") as h5_file:
@@ -168,7 +172,7 @@ async def main_loop(
                         timestamp_dset[frame_count] = timestamp
                         frame_count += 1
                     else:
-                        print(f"Warning: IK produced NaNs on frame {frame_count}. Skipping.")
+                        logger.warning("IK produced NaNs on frame %d. Skipping.", frame_count)
 
                 # Optional preview window
                 if show_preview:
@@ -204,10 +208,11 @@ async def main_loop(
                         avg_frame_time = sum(frame_times[-fps_check_interval:]) / fps_check_interval
                         actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
 
-                        if actual_fps < target_fps * 0.9:  # Warn if actual is < 90% of target
-                            print(
-                                f"\n[WARNING] Actual frequency ({actual_fps:.1f} Hz) is lower than "
-                                f"target ({target_fps:.1f} Hz). Consider reducing target frequency."
+                        if actual_fps < target_fps:
+                            logger.warning(
+                                "Actual frequency (%f Hz) is lower than target (%f Hz).",
+                                actual_fps,
+                                target_fps,
                             )
 
                         last_fps_check_frame = frame_count
@@ -233,19 +238,21 @@ async def main_loop(
                 h5_file.attrs["total_frames"] = frame_count
                 h5_file.attrs["total_time"] = total_time
 
-                print(f"\nSaved {frame_count} frames to {output_path}")
-                print(f"Actual frequency: {actual_fps:.2f} Hz (target: {target_fps:.1f} Hz)")
+                logger.info("Saved %d frames to %s", frame_count, output_path)
+                logger.info("Actual frequency: %f Hz (target: %f Hz)", actual_fps, target_fps)
 
-                if actual_fps < target_fps * 0.9:
-                    print(
-                        f"[WARNING] Final frequency ({actual_fps:.2f} Hz) was significantly lower "
-                        f"than target ({target_fps:.1f} Hz). Consider reducing --fps for future recordings."
+                if actual_fps < target_fps:
+                    logger.warning(
+                        "Final frequency (%f Hz) was lower than target (%f Hz). \
+                    Consider reducing --fps for future recordings.",
+                        actual_fps,
+                        target_fps,
                     )
             else:
-                print("Warning: No valid frames recorded!")
+                logger.warning("No valid frames recorded!")
 
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")
     finally:
         if show_preview:
             cv2.destroyAllWindows()
@@ -256,6 +263,7 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--model", type=str, default="orca_hand.mjcf")
     parser.add_argument("--scale", type=float, default=1.3, help="Robot/Human hand scale factor")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument(
         "--targets",
         type=str,
@@ -285,11 +293,13 @@ def main() -> None:
         type=float,
         default=30.0,
         help=(
-            "Target frequency in Hz for recording (default: 30.0). "
-            "Warning will be shown if actual frequency is lower."
+            "Target frequency in Hz for recording (default: 30.0). Warning will be shown if actual frequency is lower."
         ),
     )
     args = parser.parse_args()
+
+    level = logging.DEBUG if args.debug else logging.INFO
+    colorlogging.configure(level=level)
 
     raw_targets = [part.strip().lower() for part in args.targets.split(",")]
     target_joints = tuple(dict.fromkeys(jt for jt in raw_targets if jt))
@@ -305,7 +315,7 @@ def main() -> None:
     model_path = script_dir.parent / "models" / args.model if not Path(args.model).is_absolute() else Path(args.model)
 
     if not model_path.exists():
-        print(f"Error: Model not found at {model_path}")
+        logger.error("Model not found at %s", model_path)
         return
 
     # 2. Load MuJoCo Model
