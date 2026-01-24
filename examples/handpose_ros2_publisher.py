@@ -12,7 +12,15 @@ import argparse
 import sys
 import time
 import traceback
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# Remove system ROS2 paths from sys.path to prefer conda-installed ROS2 packages
+# This prevents conflicts when system ROS2 (Python 3.10) is incompatible with conda env (Python 3.11)
+sys.path = [
+    p for p in sys.path
+    if not (p.startswith("/opt/ros/") and "python3.10" in p)
+]
 
 import cv2
 import mujoco
@@ -25,8 +33,61 @@ from sensor_msgs.msg import JointState
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from handpose.ik_retargeting import ORCA_JOINT_NAMES, ORCAHandIKConfig, ORCAHandIKRetargeting
+from handpose.ik_retargeting import (
+    FINGER_TARGET_BODIES,
+    ORCA_JOINT_NAMES,
+    ORCAHandIKConfig,
+    ORCAHandIKRetargeting,
+)
 from handpose.tracker.hamer import HaMeRTracker
+
+
+def inject_target_bodies(mjcf_path: Path) -> str:
+    """Injects mocap bodies and tip sites into the MJCF XML string for IK targeting.
+    
+    This matches the approach in live_demo_ik.py to ensure tip sites exist for all fingers.
+    """
+    tree = ET.parse(mjcf_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+
+    if worldbody is None:
+        raise ValueError("Could not find worldbody in MJCF")
+
+    # Convert relative paths to absolute paths
+    # MuJoCo can't resolve relative paths when loading from string
+    model_dir = mjcf_path.parent
+    for asset in root.findall(".//asset"):
+        for mesh in asset.findall("mesh"):
+            file_attr = mesh.get("file")
+            if file_attr and not Path(file_attr).is_absolute():
+                # Convert relative path to absolute
+                abs_path = (model_dir / file_attr).resolve()
+                mesh.set("file", str(abs_path))
+
+    # Add tip sites for all fingers (required for tip tracking)
+    tip_site_specs = {
+        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.018])),
+        "index": ("right_index_ip", np.array([0.0, 0.0, 0.020])),
+        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.022])),
+        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.021])),
+        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.018])),
+    }
+
+    for finger, (parent_body, offset) in tip_site_specs.items():
+        body_elem = root.find(f".//body[@name='{parent_body}']")
+        if body_elem is None:
+            continue
+        site_name = f"right_{finger}_tip_site"
+        if body_elem.find(f"./site[@name='{site_name}']") is not None:
+            continue
+        site = ET.SubElement(body_elem, "site")
+        site.set("name", site_name)
+        site.set("pos", " ".join(f"{value:.5f}" for value in offset))
+        site.set("size", "0.0025")
+        site.set("rgba", "1 0.6 0.2 0.8")
+
+    return ET.tostring(root, encoding="unicode")
 
 
 class HandPoseROS2Publisher(Node):
@@ -44,6 +105,8 @@ class HandPoseROS2Publisher(Node):
         hold_last: bool = False,
         width: int = 1280,
         height: int = 720,
+        joint_smoothing: float = 1.0,
+        target_joint_types: tuple[str, ...] = ("tip", "ip"),
     ) -> None:
         """Initialize the HandPose ROS2 publisher.
 
@@ -58,6 +121,8 @@ class HandPoseROS2Publisher(Node):
             hold_last: If True, publish last valid joint values when hand is not detected
             width: Camera frame width
             height: Camera frame height
+            joint_smoothing: Smoothing factor for joint positions (0.0-1.0). Default: 1.0 (no smoothing)
+            target_joint_types: Tuple of joint types to target for IK (tip, ip, pip, mcp). Default: ("tip", "ip")
         """
         super().__init__("handpose_hamer_publisher")
 
@@ -87,11 +152,24 @@ class HandPoseROS2Publisher(Node):
             raise FileNotFoundError(f"Model file not found: {model_file}")
 
         self.get_logger().info(f"Loading MuJoCo model from {model_file}")
-        model = mujoco.MjModel.from_xml_path(str(model_file))
+        # Inject tip sites into MJCF (required for tip tracking, matches live_demo_ik.py)
+        xml_string = inject_target_bodies(model_file)
+        self.model = mujoco.MjModel.from_xml_string(xml_string)
 
         # IK retargeting
-        ik_cfg = ORCAHandIKConfig(scale_factor=scale)
-        self.ik = ORCAHandIKRetargeting(model, config=ik_cfg)
+        # Use the same wrist_offset_palm as live_demo_ik.py to match USD model coordinate frame
+        # The default MJCF offset [0.002, -0.00144, -0.03872] may not match the USD model
+        ik_cfg = ORCAHandIKConfig(
+            scale_factor=scale,
+            target_joint_types=target_joint_types,
+            wrist_offset_palm=np.array([0.000, 0.0, -0.05]),  # Match live_demo_ik.py
+        )
+        self.ik = ORCAHandIKRetargeting(self.model, config=ik_cfg)
+
+        # Initialize joint position smoothing state and MuJoCo data for forward kinematics
+        self.data = mujoco.MjData(self.model)
+        self.smoothed_qpos = self.data.qpos.copy()
+        self.joint_smoothing = joint_smoothing
 
         # State tracking
         self.last_joint_vals = None
@@ -137,7 +215,20 @@ class HandPoseROS2Publisher(Node):
         joint_vals = None
         if hand is not None:
             try:
+                # Update IK solver configuration with current robot state (required for proper IK solving)
+                # This matches the approach in live_demo_ik.py
+                self.data.qpos[:] = self.smoothed_qpos
+                mujoco.mj_forward(self.model, self.data)
+                self.ik.configuration.update(self.data.qpos)
+                
+                # Solve IK
                 qpos = self.ik.solve(hand)
+                
+                # Apply joint position smoothing (always applied; joint_smoothing=1.0 means no smoothing)
+                if not np.any(np.isnan(qpos)) and not np.any(np.isinf(qpos)):
+                    # Exponential moving average: smoothed = joint_smoothing * new + (1 - joint_smoothing) * old
+                    self.smoothed_qpos = self.joint_smoothing * qpos + (1.0 - self.joint_smoothing) * self.smoothed_qpos
+                    qpos = self.smoothed_qpos
                 joint_vals = qpos[self.ik.joint_indices]  # Extract only ORCA joints
                 self.last_joint_vals = joint_vals.copy()
                 self.hand_detected_count += 1
@@ -244,8 +335,34 @@ def main() -> None:
     )
     parser.add_argument("--width", type=int, default=1280, help="Camera frame width")
     parser.add_argument("--height", type=int, default=720, help="Camera frame height")
+    parser.add_argument(
+        "--joint-smoothing",
+        type=float,
+        default=1.0,
+        help="Smoothing factor for joint positions (0.0-1.0). Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
+    )
+    parser.add_argument(
+        "--targets",
+        type=str,
+        default="tip, ip",
+        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
+    )
 
     args = parser.parse_args()
+
+    # Parse and validate target joint types
+    raw_targets = [part.strip().lower() for part in args.targets.split(",")]
+    target_joints = tuple(dict.fromkeys(jt for jt in raw_targets if jt))
+    if not target_joints:
+        target_joints = ("tip",)
+    supported_targets = {"tip", "ip", "pip", "mcp"}
+    invalid = [jt for jt in target_joints if jt not in supported_targets]
+    if invalid:
+        parser.error(f"Unsupported target joint types: {', '.join(invalid)}")
+
+    # Validate joint smoothing value
+    if not (0.0 < args.joint_smoothing <= 1.0):
+        parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
 
     # Initialize ROS2
     rclpy.init()
@@ -262,6 +379,8 @@ def main() -> None:
             hold_last=args.hold_last,
             width=args.width,
             height=args.height,
+            joint_smoothing=args.joint_smoothing,
+            target_joint_types=target_joints,
         )
         rclpy.spin(node)
         node.destroy_node()
