@@ -17,34 +17,30 @@ from pathlib import Path
 
 # Remove system ROS2 paths from sys.path to prefer conda-installed ROS2 packages
 # This prevents conflicts when system ROS2 (Python 3.10) is incompatible with conda env (Python 3.11)
-sys.path = [
-    p for p in sys.path
-    if not (p.startswith("/opt/ros/") and "python3.10" in p)
-]
+sys.path = [p for p in sys.path if not (p.startswith("/opt/ros/") and "python3.10" in p)]
 
-import cv2
-import mujoco
-import numpy as np
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import JointState
+import cv2  # noqa: E402
+import mujoco  # noqa: E402
+import numpy as np  # noqa: E402
+import rclpy  # noqa: E402
+from rclpy.node import Node  # noqa: E402
+from rclpy.qos import qos_profile_sensor_data  # noqa: E402
+from sensor_msgs.msg import JointState  # noqa: E402
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from handpose.ik_retargeting import (
-    FINGER_TARGET_BODIES,
+from handpose.ik_retargeting import (  # noqa: E402
     ORCA_JOINT_NAMES,
     ORCAHandIKConfig,
     ORCAHandIKRetargeting,
 )
-from handpose.tracker.hamer import HaMeRTracker
+from handpose.tracker.hamer import HaMeRTracker  # noqa: E402
 
 
 def inject_target_bodies(mjcf_path: Path) -> str:
     """Injects mocap bodies and tip sites into the MJCF XML string for IK targeting.
-    
+
     This matches the approach in live_demo_ik.py to ensure tip sites exist for all fingers.
     """
     tree = ET.parse(mjcf_path)
@@ -220,10 +216,10 @@ class HandPoseROS2Publisher(Node):
                 self.data.qpos[:] = self.smoothed_qpos
                 mujoco.mj_forward(self.model, self.data)
                 self.ik.configuration.update(self.data.qpos)
-                
+
                 # Solve IK
                 qpos = self.ik.solve(hand)
-                
+
                 # Apply joint position smoothing (always applied; joint_smoothing=1.0 means no smoothing)
                 if not np.any(np.isnan(qpos)) and not np.any(np.isinf(qpos)):
                     # Exponential moving average: smoothed = joint_smoothing * new + (1 - joint_smoothing) * old
@@ -339,7 +335,8 @@ def main() -> None:
         "--joint-smoothing",
         type=float,
         default=1.0,
-        help="Smoothing factor for joint positions (0.0-1.0). Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
+        help="Smoothing factor for joint positions (0.0-1.0). \
+        Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
     )
     parser.add_argument(
         "--targets",
