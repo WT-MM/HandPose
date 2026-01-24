@@ -93,6 +93,7 @@ module = [
     'rclpy.*',
     'sensor_msgs.*',
     'h5py',
+    "colorlogging",
 ]
 ignore_missing_imports = true
 

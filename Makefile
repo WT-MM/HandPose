@@ -24,6 +24,7 @@ py-files := $(shell find handpose examples tests -name '*.py')
 static-checks:
 	@black --diff --check $(py-files)
 	@ruff check $(py-files)
+	@python -m pip install "numpy>=1.21.0,<2.0" --quiet
 	@mypy --install-types --non-interactive $(py-files)
 .PHONY: lint
 
