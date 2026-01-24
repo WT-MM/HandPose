@@ -65,3 +65,7 @@ install-detectron2:
 install-hamer: install-build-deps install-xtcocotools install-detectron2
 	@echo "Installing HaMeR..."
 	cd third_party/hamer && $(PIP) install . --no-build-isolation
+
+# Install all dependencies
+install-deps: install-build-deps install-xtcocotools install-detectron2 install-hamer
+

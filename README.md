@@ -14,6 +14,11 @@ Or manually:
 pip install -e ".[dev]"
 ```
 
+To install the HaMeR dependencies, run:
+```bash
+make install-deps
+```
+
 ## Running the Demos
 
 ### IK Solution
