@@ -9,8 +9,8 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.21.0",
-    "opencv-python>=4.5.0",
+    "numpy>=1.21.0,<2.0",
+    "opencv-python>=4.5.0,<4.12",
     "mediapipe>=0.10.0",
     "scipy>=1.7.0",
     "mujoco>=3.0.0",
@@ -26,6 +26,13 @@ dev = [
     "pytest-cov",
     "ruff",
     "types-pyyaml",
+]
+ros = [
+    # Note: ROS2 packages (rclpy, sensor-msgs) cannot be installed via pip.
+    # They must be installed via conda from robostack channel:
+    #   conda install -c robostack-staging -c conda-forge ros-humble-rclpy ros-humble-sensor-msgs
+    # Or use system ROS2 installation with proper Python version compatibility.
+    # See handpose/requirements-ros.txt for installation instructions.
 ]
 
 [build-system]
