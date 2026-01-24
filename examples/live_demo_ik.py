@@ -416,7 +416,8 @@ def main() -> None:
         "--joint-smoothing",
         type=float,
         default=1.0,
-        help="Smoothing factor for joint positions (0.0-1.0). Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
+        help="Smoothing factor for joint positions (0.0-1.0). \
+        Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
     )
     args = parser.parse_args()
 
