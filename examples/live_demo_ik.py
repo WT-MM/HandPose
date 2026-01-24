@@ -252,6 +252,7 @@ async def main_async(
     display_flag: Flag | None,
     label_lookup: dict[int, list[str]],
     camera_matrix: np.ndarray | None = None,
+    joint_smoothing: float = 1.0,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -273,6 +274,9 @@ async def main_async(
     frame_count = 0
     fps_start_time = time.time()
     fps: float = 0.0
+
+    # Initialize joint position smoothing state
+    smoothed_qpos = data.qpos.copy()
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while running and viewer.is_running() and cap.isOpened():
@@ -298,7 +302,13 @@ async def main_async(
                 # 2. Solve for new qpos
                 target_q = ik_solver.solve(structure)
 
-                # 3. Apply to simulation (with NaN guard)
+                # 3. Apply joint position smoothing (always applied; joint_smoothing=1.0 means no smoothing)
+                if not np.any(np.isnan(target_q)) and not np.any(np.isinf(target_q)):
+                    # Exponential moving average: smoothed = joint_smoothing * new + (1 - joint_smoothing) * old
+                    smoothed_qpos = joint_smoothing * target_q + (1.0 - joint_smoothing) * smoothed_qpos
+                    target_q = smoothed_qpos
+
+                # 4. Apply to simulation (with NaN guard)
                 if not np.any(np.isnan(target_q)) and not np.any(np.isinf(target_q)):
                     data.qpos[:] = target_q
                     data.qvel[:] = 0
@@ -370,8 +380,8 @@ async def main_async(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--model", type=str, default="orca_hand.mjcf")
-    parser.add_argument("--scale", type=float, default=1.3, help="Robot/Human hand scale factor")
+    parser.add_argument("--model", type=str, default="orca_hand_fixed.mjcf")
+    parser.add_argument("--scale", type=float, default=1.1, help="Robot/Human hand scale factor")
     parser.add_argument(
         "--dual",
         action="store_true",
@@ -387,7 +397,7 @@ def main() -> None:
         "--targets",
         type=str,
         default="tip, ip",
-        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip.",
+        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
     )
     parser.add_argument(
         "--tracker",
@@ -395,6 +405,18 @@ def main() -> None:
         choices=["mp", "hamer"],
         default="mp",
         help="Hand tracker to use: 'mp' for MediaPipe or 'hamer' for HaMeR (default: mp)",
+    )
+    parser.add_argument(
+        "--smoothing",
+        type=float,
+        default=0.0,
+        help="Exponential smoothing factor for HaMeR tracker (0.0 = no smoothing)",
+    )
+    parser.add_argument(
+        "--joint-smoothing",
+        type=float,
+        default=1.0,
+        help="Smoothing factor for joint positions (0.0-1.0). Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
     )
     args = parser.parse_args()
 
@@ -426,7 +448,7 @@ def main() -> None:
     print(f"Initializing Hand Tracker ({args.tracker})...")
     tracker: BaseHandTracker
     if args.tracker == "hamer":
-        tracker = HaMeRTracker(smoothing_factor=0.0, conf_threshold=0.3)
+        tracker = HaMeRTracker(smoothing_factor=args.smoothing, conf_threshold=0.3)
     else:
         tracker = MediaPipeTracker(min_detection_confidence=0.6, min_tracking_confidence=0.6)
 
@@ -478,6 +500,10 @@ def main() -> None:
     print("\nStarting simulation...")
     print("Press 'q' to quit (or close viewer).")
 
+    # Validate joint smoothing value
+    if not (0.0 < args.joint_smoothing <= 1.0):
+        parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
+
     # Run async main loop
     asyncio.run(
         main_async(
@@ -491,6 +517,7 @@ def main() -> None:
             display_flag,
             mp_label_lookup,
             camera_matrix,
+            joint_smoothing=args.joint_smoothing,
         )
     )
 
