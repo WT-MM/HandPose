@@ -253,6 +253,7 @@ async def main_async(
     label_lookup: dict[int, list[str]],
     camera_matrix: np.ndarray | None = None,
     joint_smoothing: float = 1.0,
+    auto_scale_once: bool = False,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -278,6 +279,9 @@ async def main_async(
     # Initialize joint position smoothing state
     smoothed_qpos = data.qpos.copy()
 
+    # Track if we've computed scale once (for auto-scale-once mode)
+    scale_computed_once = False
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while running and viewer.is_running() and cap.isOpened():
             ret, frame = cap.read()
@@ -293,6 +297,16 @@ async def main_async(
 
             if hand_structures:
                 structure = hand_structures[0]
+
+                # --- AUTO-SCALE (once mode) ---
+                if auto_scale_once and not scale_computed_once and ik_solver.config.auto_scale:
+                    # Temporarily disable continuous auto-scaling
+                    ik_solver.config.auto_scale = False
+                    # Compute scale factor once
+                    computed_scale = ik_solver.compute_auto_scale_factor(structure, use_neutral_robot_pose=True)
+                    ik_solver.config.scale_factor = computed_scale
+                    scale_computed_once = True
+                    print(f"[Auto-Scale] Computed scale factor: {computed_scale:.3f}")
 
                 # --- IK SOLVE ---
                 # 1. Update the configuration object with current robot state
@@ -419,6 +433,22 @@ def main() -> None:
         help="Smoothing factor for joint positions (0.0-1.0). \
         Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
     )
+    parser.add_argument(
+        "--auto-scale",
+        action="store_true",
+        help="Enable automatic scale factor computation based on fingertip distances",
+    )
+    parser.add_argument(
+        "--auto-scale-once",
+        action="store_true",
+        help="Compute scale factor once on first hand detection (default: update every frame)",
+    )
+    parser.add_argument(
+        "--auto-scale-update-rate",
+        type=float,
+        default=0.1,
+        help="Exponential smoothing rate for auto-scaling (0.0-1.0). Lower = smoother. Default: 0.1",
+    )
     args = parser.parse_args()
 
     raw_targets = [part.strip().lower() for part in args.targets.split(",")]
@@ -459,6 +489,9 @@ def main() -> None:
         scale_factor=args.scale,
         wrist_offset_palm=np.array([0.000, 0.0, -0.05]),
         target_joint_types=target_joints,
+        auto_scale=args.auto_scale,
+        auto_scale_update_rate=args.auto_scale_update_rate if args.auto_scale else 0.0,
+        auto_scale_use_neutral_pose=True,
     )
 
     ik_solver = ORCAHandIKRetargeting(model, config=ik_config)
@@ -505,6 +538,14 @@ def main() -> None:
     if not (0.0 < args.joint_smoothing <= 1.0):
         parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
 
+    # Validate auto-scale update rate
+    if args.auto_scale and not (0.0 <= args.auto_scale_update_rate <= 1.0):
+        parser.error("--auto-scale-update-rate must be between 0.0 and 1.0")
+
+    # Warn if auto-scale-once is used without auto-scale
+    if args.auto_scale_once and not args.auto_scale:
+        parser.error("--auto-scale-once requires --auto-scale to be enabled")
+
     # Run async main loop
     asyncio.run(
         main_async(
@@ -519,6 +560,7 @@ def main() -> None:
             mp_label_lookup,
             camera_matrix,
             joint_smoothing=args.joint_smoothing,
+            auto_scale_once=args.auto_scale_once,
         )
     )
 

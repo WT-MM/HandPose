@@ -103,6 +103,9 @@ class HandPoseROS2Publisher(Node):
         height: int = 720,
         joint_smoothing: float = 1.0,
         target_joint_types: tuple[str, ...] = ("tip", "ip"),
+        auto_scale: bool = False,
+        auto_scale_once: bool = False,
+        auto_scale_update_rate: float = 0.1,
     ) -> None:
         """Initialize the HandPose ROS2 publisher.
 
@@ -119,6 +122,9 @@ class HandPoseROS2Publisher(Node):
             height: Camera frame height
             joint_smoothing: Smoothing factor for joint positions (0.0-1.0). Default: 1.0 (no smoothing)
             target_joint_types: Tuple of joint types to target for IK (tip, ip, pip, mcp). Default: ("tip", "ip")
+            auto_scale: Enable automatic scale factor computation based on fingertip distances
+            auto_scale_once: Compute scale factor once on first hand detection (default: update every frame)
+            auto_scale_update_rate: Exponential smoothing rate for auto-scaling (0.0-1.0). Default: 0.1
         """
         super().__init__("handpose_hamer_publisher")
 
@@ -159,8 +165,15 @@ class HandPoseROS2Publisher(Node):
             scale_factor=scale,
             target_joint_types=target_joint_types,
             wrist_offset_palm=np.array([0.000, 0.0, -0.05]),  # Match live_demo_ik.py
+            auto_scale=auto_scale,
+            auto_scale_update_rate=auto_scale_update_rate if auto_scale else 0.0,
+            auto_scale_use_neutral_pose=True,
         )
         self.ik = ORCAHandIKRetargeting(self.model, config=ik_cfg)
+
+        # Track if we've computed the scale factor once (for auto-scale-once mode)
+        self.scale_computed_once = False
+        self.auto_scale_once = auto_scale_once
 
         # Initialize joint position smoothing state and MuJoCo data for forward kinematics
         self.data = mujoco.MjData(self.model)
@@ -211,6 +224,16 @@ class HandPoseROS2Publisher(Node):
         joint_vals = None
         if hand is not None:
             try:
+                # Auto-scale (once mode)
+                if self.auto_scale_once and not self.scale_computed_once and self.ik.config.auto_scale:
+                    # Temporarily disable continuous auto-scaling
+                    self.ik.config.auto_scale = False
+                    # Compute scale factor once
+                    computed_scale = self.ik.compute_auto_scale_factor(hand, use_neutral_robot_pose=True)
+                    self.ik.config.scale_factor = computed_scale
+                    self.scale_computed_once = True
+                    self.get_logger().info(f"[Auto-Scale] Computed scale factor: {computed_scale:.3f}")
+
                 # Update IK solver configuration with current robot state (required for proper IK solving)
                 # This matches the approach in live_demo_ik.py
                 self.data.qpos[:] = self.smoothed_qpos
@@ -344,6 +367,22 @@ def main() -> None:
         default="tip, ip",
         help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
     )
+    parser.add_argument(
+        "--auto-scale",
+        action="store_true",
+        help="Enable automatic scale factor computation based on fingertip distances",
+    )
+    parser.add_argument(
+        "--auto-scale-once",
+        action="store_true",
+        help="Compute scale factor once on first hand detection (default: update every frame)",
+    )
+    parser.add_argument(
+        "--auto-scale-update-rate",
+        type=float,
+        default=0.1,
+        help="Exponential smoothing rate for auto-scaling (0.0-1.0). Lower = smoother. Default: 0.1",
+    )
 
     args = parser.parse_args()
 
@@ -360,6 +399,14 @@ def main() -> None:
     # Validate joint smoothing value
     if not (0.0 < args.joint_smoothing <= 1.0):
         parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
+
+    # Validate auto-scale update rate
+    if args.auto_scale and not (0.0 <= args.auto_scale_update_rate <= 1.0):
+        parser.error("--auto-scale-update-rate must be between 0.0 and 1.0")
+
+    # Warn if auto-scale-once is used without auto-scale
+    if args.auto_scale_once and not args.auto_scale:
+        parser.error("--auto-scale-once requires --auto-scale to be enabled")
 
     # Initialize ROS2
     rclpy.init()
@@ -378,6 +425,9 @@ def main() -> None:
             height=args.height,
             joint_smoothing=args.joint_smoothing,
             target_joint_types=target_joints,
+            auto_scale=args.auto_scale,
+            auto_scale_once=args.auto_scale_once,
+            auto_scale_update_rate=args.auto_scale_update_rate,
         )
         rclpy.spin(node)
         node.destroy_node()
