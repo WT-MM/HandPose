@@ -14,6 +14,9 @@ import time
 import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Literal
+
+from handpose.tracker.base import BaseHandTracker
 
 # Remove system ROS2 paths from sys.path to prefer conda-installed ROS2 packages
 # This prevents conflicts when system ROS2 (Python 3.10) is incompatible with conda env (Python 3.11)
@@ -36,6 +39,9 @@ from handpose.ik_retargeting import (  # noqa: E402
     ORCAHandIKRetargeting,
 )
 from handpose.tracker.hamer import HaMeRTracker  # noqa: E402
+from handpose.tracker.mediapipe import MediaPipeTracker  # noqa: E402
+
+TrackerType = Literal["hamer", "mediapipe"]
 
 
 def inject_target_bodies(mjcf_path: Path) -> str:
@@ -89,6 +95,8 @@ def inject_target_bodies(mjcf_path: Path) -> str:
 class HandPoseROS2Publisher(Node):
     """ROS2 node that publishes hand joint states from camera tracking."""
 
+    tracker: BaseHandTracker
+
     def __init__(
         self,
         camera: int = 0,
@@ -106,6 +114,7 @@ class HandPoseROS2Publisher(Node):
         auto_scale: bool = False,
         auto_scale_once: bool = False,
         auto_scale_update_rate: float = 0.1,
+        tracker_type: TrackerType = "hamer",
     ) -> None:
         """Initialize the HandPose ROS2 publisher.
 
@@ -125,8 +134,9 @@ class HandPoseROS2Publisher(Node):
             auto_scale: Enable automatic scale factor computation based on fingertip distances
             auto_scale_once: Compute scale factor once on first hand detection (default: update every frame)
             auto_scale_update_rate: Exponential smoothing rate for auto-scaling (0.0-1.0). Default: 0.1
+            tracker_type: Type of tracker to use ("hamer" or "mediapipe"). Default: "hamer"
         """
-        super().__init__("handpose_hamer_publisher")
+        super().__init__(f"handpose_{tracker_type}_publisher")
 
         # ROS2 publisher
         self.pub = self.create_publisher(JointState, "/joint_states", qos_profile_sensor_data)
@@ -143,7 +153,12 @@ class HandPoseROS2Publisher(Node):
         self.get_logger().info(f"Camera opened: {actual_width}x{actual_height}")
 
         # Hand tracker
-        self.tracker = HaMeRTracker(smoothing_factor=smoothing, conf_threshold=conf_threshold)
+        if tracker_type == "hamer":
+            self.tracker = HaMeRTracker(smoothing_factor=smoothing, conf_threshold=conf_threshold)
+        elif tracker_type == "mediapipe":
+            self.tracker = MediaPipeTracker(smoothing_factor=smoothing, min_detection_confidence=conf_threshold)
+        else:
+            raise ValueError(f"Unknown tracker type: {tracker_type}")
 
         # Load MuJoCo model
         model_file = Path(model_path)
@@ -333,7 +348,7 @@ def main() -> None:
         default="models/orca_hand_fixed.mjcf",
         help="Path to MuJoCo MJCF model file",
     )
-    parser.add_argument("--scale", type=float, default=1.0, help="Hand scale factor (robot/human)")
+    parser.add_argument("--scale", type=float, default=1.1, help="Hand scale factor (robot/human)")
     parser.add_argument("--viz", action="store_true", help="Enable OpenCV visualization window")
     parser.add_argument(
         "--smoothing",
@@ -384,6 +399,14 @@ def main() -> None:
         help="Exponential smoothing rate for auto-scaling (0.0-1.0). Lower = smoother. Default: 0.1",
     )
 
+    parser.add_argument(
+        "--tracker",
+        type=str,
+        default="hamer",
+        choices=["hamer", "mediapipe"],
+        help="Hand tracking backend (hamer or mediapipe)",
+    )
+
     args = parser.parse_args()
 
     # Parse and validate target joint types
@@ -428,6 +451,7 @@ def main() -> None:
             auto_scale=args.auto_scale,
             auto_scale_once=args.auto_scale_once,
             auto_scale_update_rate=args.auto_scale_update_rate,
+            tracker_type=args.tracker,
         )
         rclpy.spin(node)
         node.destroy_node()
