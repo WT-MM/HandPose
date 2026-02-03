@@ -64,15 +64,13 @@ def inject_visualization_bodies(mjcf_path: Path, target_joint_types: tuple[str, 
     # All IK target sites use blue for consistency
     ik_site_color = "0 0 1 0.9"  # Blue for all IK targets
 
-    # First, ensure tip sites exist (create if they don't)
     # Tip site offsets: [x, y, z] where z is upward direction
-    # Increased z offsets to move tips higher/more visible
     tip_site_specs = {
-        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.025])),  # Keep as is - good alignment
-        "index": ("right_index_ip", np.array([0.0, 0.0, 0.035])),  # Increased from 0.028
-        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.037])),  # Increased from 0.030
-        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.036])),  # Increased from 0.029
-        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.032])),  # Increased from 0.025
+        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.025])),
+        "index": ("right_index_ip", np.array([0.0, 0.0, 0.035])),
+        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.037])),
+        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.036])),
+        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.032])),
     }
 
     if "tip" in target_joint_types:
@@ -87,7 +85,7 @@ def inject_visualization_bodies(mjcf_path: Path, target_joint_types: tuple[str, 
             if existing_site is not None:
                 # Update existing site - make it larger and blue
                 existing_site.set("type", "sphere")  # Ensure type is set
-                existing_site.set("size", "0.005")  # Larger for better visibility
+                existing_site.set("size", "0.005")
                 existing_site.set("rgba", ik_site_color)
                 tip_sites_created.append(f"{finger} (updated)")
             else:
@@ -96,7 +94,7 @@ def inject_visualization_bodies(mjcf_path: Path, target_joint_types: tuple[str, 
                 site.set("name", site_name)
                 site.set("type", "sphere")  # Explicit type for visibility
                 site.set("pos", " ".join(f"{value:.5f}" for value in offset))
-                site.set("size", "0.005")  # Larger for better visibility
+                site.set("size", "0.005")
                 site.set("rgba", ik_site_color)
                 tip_sites_created.append(f"{finger} (created)")
         print(f"Tip sites: {', '.join(tip_sites_created)}")
@@ -137,8 +135,7 @@ def inject_visualization_bodies(mjcf_path: Path, target_joint_types: tuple[str, 
                 for body in root.findall(".//body"):
                     site_elem = body.find(f"./site[@name='{frame_name}']")
                     if site_elem is not None:
-                        # Update site to be visible and larger
-                        site_elem.set("size", "0.005")  # Larger for better visibility
+                        site_elem.set("size", "0.005")
                         site_elem.set("rgba", ik_site_color)
                         found = True
                         markers_added.append(f"{finger_name}_{joint_type} (site updated)")

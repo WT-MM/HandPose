@@ -398,9 +398,7 @@ class ORCAHandIKRetargeting:
                     active_tasks.append(task)
 
             # Solve IK with limits (collision avoidance if enabled)
-            vel = mink.solve_ik(
-                self.configuration, active_tasks, dt, solver, damping, limits=self.limits
-            )
+            vel = mink.solve_ik(self.configuration, active_tasks, dt, solver, damping, limits=self.limits)
 
             # Integrate velocity to update configuration
             self.configuration.integrate_inplace(vel, dt)
