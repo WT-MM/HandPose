@@ -131,6 +131,13 @@ class ORCAHandIKConfig:
     coord_transform: np.ndarray | None = None
     target_joint_types: tuple[str, ...] = ("tip",)
 
+    # Auto-scaling options
+    auto_scale: bool = False  # If True, automatically computes scale_factor from fingertip distances
+    auto_scale_update_rate: float = (
+        0.1  # Exponential smoothing factor for auto-scaling (0.0 = no smoothing, 1.0 = instant)
+    )
+    auto_scale_use_neutral_pose: bool = True  # Use neutral robot pose for scale computation
+
     def __post_init__(self) -> None:
         """Initialize default values if None."""
         if self.wrist_offset_palm is None:
@@ -225,6 +232,117 @@ class ORCAHandIKRetargeting:
                 collision_detection_distance=self.config.collision_detection_distance,
             )
             self.limits.append(collision_limit)
+
+    def compute_auto_scale_factor(self, hand_structure: HandStructure, use_neutral_robot_pose: bool = True) -> float:
+        """Compute automatic scale factor based on fingertip distances.
+
+        Compares the distance from wrist to fingertips in the human hand
+        with the distance from wrist to fingertips in the ORCA hand model.
+
+        Args:
+            hand_structure: The tracked human hand structure
+            use_neutral_robot_pose: If True, uses neutral robot pose (q=0).
+                If False, uses current robot configuration.
+
+        Returns:
+            Scale factor (robot_fingertip_distance / human_fingertip_distance)
+        """
+        # Get human hand fingertip positions relative to wrist
+        wrist_pos = hand_structure.wrist_position
+        human_fingertips = {
+            "thumb": hand_structure.thumb.tip,
+            "index": hand_structure.index.tip,
+            "middle": hand_structure.middle.tip,
+            "ring": hand_structure.ring.tip,
+            "pinky": hand_structure.pinky.tip,
+        }
+
+        # Compute average distance from wrist to fingertips in human hand
+        human_distances = []
+        for finger, tip_pos in human_fingertips.items():
+            dist = np.linalg.norm(tip_pos - wrist_pos)
+            if dist > 0.01:  # Filter out invalid/too-small distances
+                human_distances.append(dist)
+
+        if len(human_distances) == 0:
+            return self.config.scale_factor  # Fallback to current scale
+
+        avg_human_distance = np.mean(human_distances)
+
+        # Get robot hand fingertip positions
+        if use_neutral_robot_pose:
+            # Save current configuration
+            saved_q = self.configuration.q.copy()
+            # Set to neutral pose
+            self.configuration.q[:] = 0.0
+            self.configuration.update()
+
+        # Get wrist position in robot model
+        t_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
+        p_palm = t_palm.translation()
+        r_palm = t_palm.rotation().as_matrix()
+        wrist_offset_world = r_palm @ self.config.wrist_offset_palm
+        p_wrist_robot = p_palm + wrist_offset_world
+
+        # Get fingertip positions from robot model using mink Configuration
+        robot_fingertips = {}
+        for finger_name in ["thumb", "index", "middle", "ring", "pinky"]:
+            if finger_name not in self.tasks:
+                continue
+            finger_tasks = self.tasks[finger_name]
+            if "tip" not in finger_tasks:
+                continue
+
+            # Get the frame name and type
+            frame_type, frame_name = FINGER_TARGET_BODIES[finger_name]["tip"]
+
+            # Get transform from mink Configuration
+            try:
+                if frame_type == "body":
+                    t_tip = self.configuration.get_transform_frame_to_world(frame_name, "body")
+                else:  # site
+                    t_tip = self.configuration.get_transform_frame_to_world(frame_name, "site")
+                tip_pos = t_tip.translation()
+                robot_fingertips[finger_name] = tip_pos
+            except Exception:
+                # Fallback: try to get from MuJoCo model directly
+                obj_type = mujoco.mjtObj.mjOBJ_BODY if frame_type == "body" else mujoco.mjtObj.mjOBJ_SITE
+                frame_id = mujoco.mj_name2id(self.model, obj_type, frame_name)
+                if frame_id >= 0:
+                    # Need to forward kinematics - use data
+                    data = mujoco.MjData(self.model)
+                    data.qpos[:] = self.configuration.q
+                    mujoco.mj_forward(self.model, data)
+                    if obj_type == mujoco.mjtObj.mjOBJ_SITE:
+                        tip_pos = data.site(frame_id).xpos.copy()
+                    else:
+                        tip_pos = data.body(frame_id).xpos.copy()
+                    robot_fingertips[finger_name] = tip_pos
+
+        # Restore configuration if we changed it
+        if use_neutral_robot_pose:
+            self.configuration.q[:] = saved_q
+            self.configuration.update()
+
+        # Compute average distance from wrist to fingertips in robot hand
+        robot_distances = []
+        for finger, tip_pos in robot_fingertips.items():
+            dist = np.linalg.norm(tip_pos - p_wrist_robot)
+            if dist > 0.01:  # Filter out invalid/too-small distances
+                robot_distances.append(dist)
+
+        if len(robot_distances) == 0:
+            return self.config.scale_factor  # Fallback to current scale
+
+        avg_robot_distance = np.mean(robot_distances)
+
+        # Compute scale factor
+        if avg_human_distance > 1e-6:
+            scale_factor = avg_robot_distance / avg_human_distance
+        else:
+            return self.config.scale_factor  # Fallback
+
+        return scale_factor
 
     def _hand_structure_to_landmarks(self, hand_structure: HandStructure) -> np.ndarray:
         """Convert HandStructure to 21x3 landmarks array (MediaPipe format).
@@ -346,6 +464,20 @@ class ORCAHandIKRetargeting:
         Returns:
             The full qpos array for the robot.
         """
+        # Auto-scale if enabled
+        if self.config.auto_scale and isinstance(hand_input, HandStructure):
+            new_scale = self.compute_auto_scale_factor(
+                hand_input, use_neutral_robot_pose=self.config.auto_scale_use_neutral_pose
+            )
+            # Apply exponential smoothing to avoid jitter
+            if self.config.auto_scale_update_rate > 0.0:
+                self.config.scale_factor = (
+                    self.config.auto_scale_update_rate * new_scale
+                    + (1.0 - self.config.auto_scale_update_rate) * self.config.scale_factor
+                )
+            else:
+                self.config.scale_factor = new_scale
+
         targets = self.compute_target_positions(hand_input)
 
         # Use configurable parameters

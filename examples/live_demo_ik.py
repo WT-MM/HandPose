@@ -363,6 +363,16 @@ async def main_async(
             if hand_structures:
                 structure = hand_structures[0]
 
+                # --- AUTO-SCALE (once mode) ---
+                if auto_scale_once and not scale_computed_once and ik_solver.config.auto_scale:
+                    # Temporarily disable continuous auto-scaling
+                    ik_solver.config.auto_scale = False
+                    # Compute scale factor once
+                    computed_scale = ik_solver.compute_auto_scale_factor(structure, use_neutral_robot_pose=True)
+                    ik_solver.config.scale_factor = computed_scale
+                    scale_computed_once = True
+                    print(f"[Auto-Scale] Computed scale factor: {computed_scale:.3f}")
+
                 # --- IK SOLVE ---
                 # 1. Update the configuration object with current robot state
                 mujoco.mj_forward(model, data)
