@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import mink
 import mujoco
 import numpy as np
+from mink.limits import CollisionAvoidanceLimit, ConfigurationLimit
 
 from handpose.tracker.base import HandStructure
 
@@ -44,22 +45,22 @@ FINGER_TARGET_BODIES = {
     },
     "index": {
         "mcp": ("body", "right_index_mp"),
-        "pip": ("body", "right_index_pp"),
+        "pip": ("body", "right_index_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_index_tip_site"),
     },
     "middle": {
         "mcp": ("body", "right_middle_mp"),
-        "pip": ("body", "right_middle_pp"),
+        "pip": ("body", "right_middle_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_middle_tip_site"),
     },
     "ring": {
         "mcp": ("body", "right_ring_mp"),
-        "pip": ("body", "right_ring_pp"),
+        "pip": ("body", "right_ring_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_ring_tip_site"),
     },
     "pinky": {
         "mcp": ("body", "right_pinky_mp"),
-        "pip": ("body", "right_pinky_pp"),
+        "pip": ("body", "right_pinky_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_pinky_tip_site"),
     },
 }
@@ -106,16 +107,23 @@ class ORCAHandIKConfig:
     # Default from MJCF: right_wrist joint pos="0.002 -0.00144 -0.03872"
     wrist_offset_palm: np.ndarray | None = None
 
-    # IK solver parameters
+    # IK solver parameters (matching manus Mink configs)
     dt: float = 0.05  # Timestep for IK integration (seconds)
-    damping: float = 1e-2  # Levenberg-Marquardt damping
-    solver: str = "daqp"  # QP solver
+    damping: float = 1e-5  # Levenberg-Marquardt damping (matching manus: 1e-5)
+    solver: str = "quadprog"  # QP solver (matching manus: "quadprog")
     ik_iterations: int = 5  # Number of IK passes to perform before returning (for better convergence)
 
-    # Task costs
-    position_cost: float = 3.0  # Cost for position tracking
+    # Task costs (matching manus Mink configs)
+    position_cost: float = 1.0  # Cost for position tracking (matching manus: 1.0)
     orientation_cost: float = 0.0  # Cost for orientation tracking
-    posture_cost: float = 1e-4  # Cost for posture task (keeps hand near neutral)
+    lm_damping: float = 1.0  # Levenberg-Marquardt damping for FrameTask (matching manus: 1.0)
+
+    # Collision avoidance (optional)
+    use_collision_avoidance: bool = False  # Enable CollisionAvoidanceLimit
+    collision_geom_pairs: list[tuple[list[str], list[str]]] | None = None  # Geom pairs for collision avoidance
+    collision_gain: float = 0.85  # Collision avoidance gain (default from Mink)
+    collision_min_distance: float = 0.005  # Minimum distance between geoms (meters)
+    collision_detection_distance: float = 0.01  # Distance at which collision avoidance activates (meters)
 
     # Coordinate frame transformation
     # MediaPipe to Robot coordinate mapping: [MP_X, MP_Y, MP_Z] -> [Robot_X, Robot_Y, Robot_Z]
@@ -194,7 +202,7 @@ class ORCAHandIKRetargeting:
                     frame_type=frame_type,
                     position_cost=self.config.position_cost,
                     orientation_cost=self.config.orientation_cost,
-                    lm_damping=self.config.damping,
+                    lm_damping=self.config.lm_damping,
                 )
                 finger_tasks[joint_type] = task
             if finger_tasks:
@@ -206,16 +214,17 @@ class ORCAHandIKRetargeting:
                 "(tip tracking requires fingertip sites to be injected)."
             )
 
-        # We also need a posture task to encourage the hand to stay close to a "neutral" pose
-        # when not reaching for extremes. This prevents weird internal configurations.
-        self.posture_task = mink.PostureTask(
-            model,
-            cost=self.config.posture_cost,
-            lm_damping=self.config.damping,
-        )
-
-        self.target_pose = np.zeros(model.nq)
-        self.posture_task.set_target(self.target_pose)
+        # Initialize collision avoidance limits if enabled
+        self.limits = [ConfigurationLimit(model=model)]
+        if self.config.use_collision_avoidance and self.config.collision_geom_pairs:
+            collision_limit = CollisionAvoidanceLimit(
+                model=model,
+                geom_pairs=self.config.collision_geom_pairs,
+                gain=self.config.collision_gain,
+                minimum_distance_from_collisions=self.config.collision_min_distance,
+                collision_detection_distance=self.config.collision_detection_distance,
+            )
+            self.limits.append(collision_limit)
 
     def _hand_structure_to_landmarks(self, hand_structure: HandStructure) -> np.ndarray:
         """Convert HandStructure to 21x3 landmarks array (MediaPipe format).
@@ -346,8 +355,8 @@ class ORCAHandIKRetargeting:
 
         # Perform multiple IK iterations for better convergence
         for iteration in range(self.config.ik_iterations):
-            # Build active tasks list (posture task + finger tasks)
-            active_tasks: list[mink.Task] = [self.posture_task]
+            # Build active tasks list (finger tasks only)
+            active_tasks: list[mink.Task] = []
 
             # Get palm transform and compute wrist position (consistent with compute_target_positions)
             # Recompute each iteration in case configuration changed
@@ -388,8 +397,10 @@ class ORCAHandIKRetargeting:
                     task.set_target(target_se3)
                     active_tasks.append(task)
 
-            # Solve IK
-            vel = mink.solve_ik(self.configuration, active_tasks, dt, solver, damping)
+            # Solve IK with limits (collision avoidance if enabled)
+            vel = mink.solve_ik(
+                self.configuration, active_tasks, dt, solver, damping, limits=self.limits
+            )
 
             # Integrate velocity to update configuration
             self.configuration.integrate_inplace(vel, dt)
