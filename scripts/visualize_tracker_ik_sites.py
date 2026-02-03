@@ -367,8 +367,8 @@ def main() -> None:
     parser.add_argument(
         "--targets",
         type=str,
-        default="tip, ip",
-        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
+        default="tip",
+        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip",
     )
     parser.add_argument(
         "--scale",
@@ -380,6 +380,13 @@ def main() -> None:
         "--show-feed",
         action="store_true",
         help="Show camera feed with hand tracking overlay",
+    )
+    parser.add_argument(
+        "--joint-smoothing",
+        type=float,
+        default=0.7,
+        help="Smoothing factor for joint positions (0.0-1.0). \
+        Lower values = more smoothing, higher = less smoothing. Default: 0.7",
     )
     args = parser.parse_args()
 
@@ -427,7 +434,8 @@ def main() -> None:
     ik_config = ORCAHandIKConfig(
         scale_factor=args.scale,
         target_joint_types=target_joints,
-        lm_damping=0.5
+        lm_damping=0.5,
+        ik_iterations=15,
     )
     ik_solver = ORCAHandIKRetargeting(model, config=ik_config)
 
@@ -450,7 +458,14 @@ def main() -> None:
     print("\nPress 'q' in MuJoCo viewer to quit")
     print("=" * 70 + "\n")
 
+    # Validate joint smoothing value
+    if not (0.0 < args.joint_smoothing <= 1.0):
+        parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
+
     start_time = time.time()
+
+    # Initialize joint position smoothing state
+    smoothed_qpos = data.qpos.copy()
 
     # Set up multiprocessing for display window if requested
     display_process: mp.Process | None = None
@@ -491,14 +506,20 @@ def main() -> None:
                 if hand_structures:
                     hand = hand_structures[0]
 
-                    # Update IK solver configuration
+                    # Update IK solver configuration with current smoothed state
+                    mujoco.mj_forward(model, data)
+                    data.qpos[:] = smoothed_qpos
                     mujoco.mj_forward(model, data)
                     ik_solver.configuration.update(data.qpos)
 
                     # Solve IK
                     qpos = ik_solver.solve(hand)
+
+                    # Apply joint position smoothing
                     if not np.any(np.isnan(qpos)) and not np.any(np.isinf(qpos)):
-                        data.qpos[:] = qpos
+                        # Exponential moving average: smoothed = joint_smoothing * new + (1 - joint_smoothing) * old
+                        smoothed_qpos = args.joint_smoothing * qpos + (1.0 - args.joint_smoothing) * smoothed_qpos
+                        data.qpos[:] = smoothed_qpos
                         data.qvel[:] = 0
 
                     # Update tracker site positions

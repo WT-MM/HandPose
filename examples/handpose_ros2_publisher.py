@@ -31,6 +31,7 @@ from sensor_msgs.msg import JointState  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from handpose.ik_retargeting import (  # noqa: E402
+    FINGER_TARGET_BODIES,
     ORCA_JOINT_NAMES,
     ORCAHandIKConfig,
     ORCAHandIKRetargeting,
@@ -38,10 +39,15 @@ from handpose.ik_retargeting import (  # noqa: E402
 from handpose.tracker.hamer import HaMeRTracker  # noqa: E402
 
 
-def inject_target_bodies(mjcf_path: Path) -> str:
-    """Injects mocap bodies and tip sites into the MJCF XML string for IK targeting.
+def inject_target_bodies(mjcf_path: Path, target_joint_types: tuple[str, ...]) -> str:
+    """Inject mocap bodies for tracker sites and ensure IK target sites exist.
 
-    This matches the approach in live_demo_ik.py to ensure tip sites exist for all fingers.
+    Args:
+        mjcf_path: Path to MJCF model file
+        target_joint_types: Tuple of joint types to visualize (tip, ip, pip, mcp)
+
+    Returns:
+        Modified MJCF XML string
     """
     tree = ET.parse(mjcf_path)
     root = tree.getroot()
@@ -51,37 +57,99 @@ def inject_target_bodies(mjcf_path: Path) -> str:
         raise ValueError("Could not find worldbody in MJCF")
 
     # Convert relative paths to absolute paths
-    # MuJoCo can't resolve relative paths when loading from string
     model_dir = mjcf_path.parent
     for asset in root.findall(".//asset"):
         for mesh in asset.findall("mesh"):
             file_attr = mesh.get("file")
             if file_attr and not Path(file_attr).is_absolute():
-                # Convert relative path to absolute
                 abs_path = (model_dir / file_attr).resolve()
                 mesh.set("file", str(abs_path))
 
-    # Add tip sites for all fingers (required for tip tracking)
+    # All IK target sites use blue for consistency
+    ik_site_color = "0 0 1 0.9"  # Blue for all IK targets
+
+    # Tip site offsets: [x, y, z] where z is upward direction
     tip_site_specs = {
-        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.018])),
-        "index": ("right_index_ip", np.array([0.0, 0.0, 0.020])),
-        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.022])),
-        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.021])),
-        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.018])),
+        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.025])),
+        "index": ("right_index_ip", np.array([0.0, 0.0, 0.035])),
+        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.037])),
+        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.036])),
+        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.032])),
     }
 
-    for finger, (parent_body, offset) in tip_site_specs.items():
-        body_elem = root.find(f".//body[@name='{parent_body}']")
-        if body_elem is None:
-            continue
-        site_name = f"right_{finger}_tip_site"
-        if body_elem.find(f"./site[@name='{site_name}']") is not None:
-            continue
-        site = ET.SubElement(body_elem, "site")
-        site.set("name", site_name)
-        site.set("pos", " ".join(f"{value:.5f}" for value in offset))
-        site.set("size", "0.0025")
-        site.set("rgba", "1 0.6 0.2 0.8")
+    if "tip" in target_joint_types:
+        tip_sites_created = []
+        for finger, (parent_body, offset) in tip_site_specs.items():
+            body_elem = root.find(f".//body[@name='{parent_body}']")
+            if body_elem is None:
+                print(f"Warning: Parent body '{parent_body}' not found for {finger} tip site")
+                continue
+            site_name = f"right_{finger}_tip_site"
+            existing_site = body_elem.find(f"./site[@name='{site_name}']")
+            if existing_site is not None:
+                # Update existing site - make it larger and blue
+                existing_site.set("type", "sphere")  # Ensure type is set
+                existing_site.set("size", "0.005")
+                existing_site.set("rgba", ik_site_color)
+                tip_sites_created.append(f"{finger} (updated)")
+            else:
+                # Create new tip site
+                site = ET.SubElement(body_elem, "site")
+                site.set("name", site_name)
+                site.set("type", "sphere")  # Explicit type for visibility
+                site.set("pos", " ".join(f"{value:.5f}" for value in offset))
+                site.set("size", "0.005")
+                site.set("rgba", ik_site_color)
+                tip_sites_created.append(f"{finger} (created)")
+        if tip_sites_created:
+            print(f"Tip sites: {', '.join(tip_sites_created)}")
+
+    # Add visual markers for IK target bodies (MCP, PIP, IP) that might not have visual geoms
+    allowed_types = set(target_joint_types)
+    markers_added = []
+    for finger_name, bodies in FINGER_TARGET_BODIES.items():
+        for joint_type, (frame_type, frame_name) in bodies.items():
+            if joint_type not in allowed_types:
+                continue
+
+            if frame_type == "body":
+                # Add a visual site to the body for visibility
+                body_elem = root.find(f".//body[@name='{frame_name}']")
+                if body_elem is not None:
+                    # Check if marker site already exists
+                    marker_site_name = f"ik_marker_{frame_name}"
+                    existing_marker = body_elem.find(f"./site[@name='{marker_site_name}']")
+                    if existing_marker is not None:
+                        # Update existing marker
+                        existing_marker.set("size", "0.004")  # Same size as tip sites
+                        existing_marker.set("rgba", ik_site_color)
+                        markers_added.append(f"{finger_name}_{joint_type} (updated)")
+                    else:
+                        # Create new marker site
+                        site = ET.SubElement(body_elem, "site")
+                        site.set("name", marker_site_name)
+                        site.set("pos", "0 0 0")  # At body origin
+                        site.set("size", "0.004")  # Same size as tip sites for consistency
+                        site.set("rgba", ik_site_color)  # Blue for all IK targets
+                        markers_added.append(f"{finger_name}_{joint_type} (created)")
+                else:
+                    print(f"Warning: Body '{frame_name}' not found in MJCF for {finger_name}_{joint_type}")
+            elif frame_type == "site":
+                # This is a tip site - find and update it (should already be handled above, but double-check)
+                found = False
+                for body in root.findall(".//body"):
+                    site_elem = body.find(f"./site[@name='{frame_name}']")
+                    if site_elem is not None:
+                        site_elem.set("size", "0.005")
+                        site_elem.set("rgba", ik_site_color)
+                        found = True
+                        markers_added.append(f"{finger_name}_{joint_type} (site updated)")
+                        break
+                if not found:
+                    print(f"Warning: Site '{frame_name}' not found in MJCF for {finger_name}_{joint_type}")
+
+    if markers_added:
+        print(f"Added/updated {len(markers_added)} IK target markers: {', '.join(markers_added)}")
 
     return ET.tostring(root, encoding="unicode")
 
@@ -101,7 +169,7 @@ class HandPoseROS2Publisher(Node):
         hold_last: bool = False,
         width: int = 1280,
         height: int = 720,
-        joint_smoothing: float = 1.0,
+        joint_smoothing: float = 0.7,
         target_joint_types: tuple[str, ...] = ("tip", "ip"),
     ) -> None:
         """Initialize the HandPose ROS2 publisher.
@@ -117,7 +185,7 @@ class HandPoseROS2Publisher(Node):
             hold_last: If True, publish last valid joint values when hand is not detected
             width: Camera frame width
             height: Camera frame height
-            joint_smoothing: Smoothing factor for joint positions (0.0-1.0). Default: 1.0 (no smoothing)
+            joint_smoothing: Smoothing factor for joint positions (0.0-1.0). Default: 0.7
             target_joint_types: Tuple of joint types to target for IK (tip, ip, pip, mcp). Default: ("tip", "ip")
         """
         super().__init__("handpose_hamer_publisher")
@@ -148,17 +216,31 @@ class HandPoseROS2Publisher(Node):
             raise FileNotFoundError(f"Model file not found: {model_file}")
 
         self.get_logger().info(f"Loading MuJoCo model from {model_file}")
-        # Inject tip sites into MJCF (required for tip tracking, matches live_demo_ik.py)
-        xml_string = inject_target_bodies(model_file)
+        # Inject tip sites into MJCF (required for tip tracking)
+        xml_string = inject_target_bodies(model_file, target_joint_types)
         self.model = mujoco.MjModel.from_xml_string(xml_string)
 
+        # Verify tip sites exist in the loaded model
+        if "tip" in target_joint_types:
+            self.get_logger().info("Verifying tip sites in loaded model:")
+            data_temp = mujoco.MjData(self.model)
+            for finger in ["thumb", "index", "middle", "ring", "pinky"]:
+                site_name = f"right_{finger}_tip_site"
+                site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+                if site_id >= 0:
+                    site_pos = data_temp.site(site_id).xpos.copy()
+                    self.get_logger().info(
+                        f"  ✓ {site_name}: found at position [{site_pos[0]:.4f}, {site_pos[1]:.4f}, {site_pos[2]:.4f}]"
+                    )
+                else:
+                    self.get_logger().warn(f"  ✗ {site_name}: NOT FOUND in model!")
+
         # IK retargeting
-        # Use the same wrist_offset_palm as live_demo_ik.py to match USD model coordinate frame
-        # The default MJCF offset [0.002, -0.00144, -0.03872] may not match the USD model
         ik_cfg = ORCAHandIKConfig(
             scale_factor=scale,
             target_joint_types=target_joint_types,
-            wrist_offset_palm=np.array([0.000, 0.0, -0.05]),  # Match live_demo_ik.py
+            lm_damping=0.5,
+            ik_iterations=15,
         )
         self.ik = ORCAHandIKRetargeting(self.model, config=ik_cfg)
 
@@ -334,15 +416,15 @@ def main() -> None:
     parser.add_argument(
         "--joint-smoothing",
         type=float,
-        default=1.0,
+        default=0.7,
         help="Smoothing factor for joint positions (0.0-1.0). \
-        Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
+        Lower values = more smoothing, higher = less smoothing. Default: 0.7",
     )
     parser.add_argument(
         "--targets",
         type=str,
-        default="tip, ip",
-        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
+        default="tip",
+        help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip",
     )
 
     args = parser.parse_args()
