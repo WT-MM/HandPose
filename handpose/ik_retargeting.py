@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import mink
 import mujoco
 import numpy as np
-from mink.limits import CollisionAvoidanceLimit, ConfigurationLimit
+from mink.limits import CollisionAvoidanceLimit, ConfigurationLimit, Limit
 
 from handpose.tracker.base import HandStructure
 
@@ -211,7 +211,7 @@ class ORCAHandIKRetargeting:
             )
 
         # Initialize collision avoidance limits if enabled
-        self.limits = [ConfigurationLimit(model=model)]
+        self.limits: list[Limit] = [ConfigurationLimit(model=model)]
         if self.config.use_collision_avoidance and self.config.collision_geom_pairs:
             collision_limit = CollisionAvoidanceLimit(
                 model=model,
