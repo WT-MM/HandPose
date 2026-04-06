@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import mink
 import mujoco
 import numpy as np
+from mink.limits import CollisionAvoidanceLimit, ConfigurationLimit, Limit
 
 from handpose.tracker.base import HandStructure
 
@@ -44,22 +45,22 @@ FINGER_TARGET_BODIES = {
     },
     "index": {
         "mcp": ("body", "right_index_mp"),
-        "pip": ("body", "right_index_pp"),
+        "pip": ("body", "right_index_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_index_tip_site"),
     },
     "middle": {
         "mcp": ("body", "right_middle_mp"),
-        "pip": ("body", "right_middle_pp"),
+        "pip": ("body", "right_middle_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_middle_tip_site"),
     },
     "ring": {
         "mcp": ("body", "right_ring_mp"),
-        "pip": ("body", "right_ring_pp"),
+        "pip": ("body", "right_ring_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_ring_tip_site"),
     },
     "pinky": {
         "mcp": ("body", "right_pinky_mp"),
-        "pip": ("body", "right_pinky_pp"),
+        "pip": ("body", "right_pinky_ip"),  # _ip body contains the PIP joint
         "tip": ("site", "right_pinky_tip_site"),
     },
 }
@@ -106,29 +107,29 @@ class ORCAHandIKConfig:
     # Default from MJCF: right_wrist joint pos="0.002 -0.00144 -0.03872"
     wrist_offset_palm: np.ndarray | None = None
 
-    # IK solver parameters
+    # IK solver parameters (matching manus Mink configs)
     dt: float = 0.05  # Timestep for IK integration (seconds)
-    damping: float = 1e-2  # Levenberg-Marquardt damping
-    solver: str = "daqp"  # QP solver
+    damping: float = 1e-5  # Levenberg-Marquardt damping (matching manus: 1e-5)
+    solver: str = "quadprog"  # QP solver (matching manus: "quadprog")
     ik_iterations: int = 5  # Number of IK passes to perform before returning (for better convergence)
 
-    # Task costs
-    position_cost: float = 3.0  # Cost for position tracking
+    # Task costs (matching manus Mink configs)
+    position_cost: float = 1.0  # Cost for position tracking (matching manus: 1.0)
     orientation_cost: float = 0.0  # Cost for orientation tracking
-    posture_cost: float = 1e-4  # Cost for posture task (keeps hand near neutral)
+    lm_damping: float = 1.0  # Levenberg-Marquardt damping for FrameTask (matching manus: 1.0)
+
+    # Collision avoidance (optional)
+    use_collision_avoidance: bool = False  # Enable CollisionAvoidanceLimit
+    collision_geom_pairs: list[tuple[list[str], list[str]]] | None = None  # Geom pairs for collision avoidance
+    collision_gain: float = 0.85  # Collision avoidance gain (default from Mink)
+    collision_min_distance: float = 0.005  # Minimum distance between geoms (meters)
+    collision_detection_distance: float = 0.01  # Distance at which collision avoidance activates (meters)
 
     # Coordinate frame transformation
     # MediaPipe to Robot coordinate mapping: [MP_X, MP_Y, MP_Z] -> [Robot_X, Robot_Y, Robot_Z]
     # Default: MP (X=Forward, Y=Normal, Z=Side) -> Robot (Z=Up, X=Side, Y=Normal)
     coord_transform: np.ndarray | None = None
     target_joint_types: tuple[str, ...] = ("tip",)
-
-    # Auto-scaling options
-    auto_scale: bool = False  # If True, automatically computes scale_factor from fingertip distances
-    auto_scale_update_rate: float = (
-        0.1  # Exponential smoothing factor for auto-scaling (0.0 = no smoothing, 1.0 = instant)
-    )
-    auto_scale_use_neutral_pose: bool = True  # Use neutral robot pose for scale computation
 
     def __post_init__(self) -> None:
         """Initialize default values if None."""
@@ -168,10 +169,6 @@ class ORCAHandIKRetargeting:
         self.model = model
         self.configuration = mink.Configuration(model)
 
-        # Initialize config
-        if config is None:
-            config = ORCAHandIKConfig.default_config()
-
         self.config = config
 
         # Identify the qpos indices for the finger joints we want to control
@@ -201,7 +198,7 @@ class ORCAHandIKRetargeting:
                     frame_type=frame_type,
                     position_cost=self.config.position_cost,
                     orientation_cost=self.config.orientation_cost,
-                    lm_damping=self.config.damping,
+                    lm_damping=self.config.lm_damping,
                 )
                 finger_tasks[joint_type] = task
             if finger_tasks:
@@ -213,127 +210,17 @@ class ORCAHandIKRetargeting:
                 "(tip tracking requires fingertip sites to be injected)."
             )
 
-        # We also need a posture task to encourage the hand to stay close to a "neutral" pose
-        # when not reaching for extremes. This prevents weird internal configurations.
-        self.posture_task = mink.PostureTask(
-            model,
-            cost=self.config.posture_cost,
-            lm_damping=self.config.damping,
-        )
-
-        self.target_pose = np.zeros(model.nq)
-        self.posture_task.set_target(self.target_pose)
-
-    def compute_auto_scale_factor(self, hand_structure: HandStructure, use_neutral_robot_pose: bool = True) -> float:
-        """Compute automatic scale factor based on fingertip distances.
-
-        Compares the distance from wrist to fingertips in the human hand
-        with the distance from wrist to fingertips in the ORCA hand model.
-
-        Args:
-            hand_structure: The tracked human hand structure
-            use_neutral_robot_pose: If True, uses neutral robot pose (q=0).
-                If False, uses current robot configuration.
-
-        Returns:
-            Scale factor (robot_fingertip_distance / human_fingertip_distance)
-        """
-        # Get human hand fingertip positions relative to wrist
-        wrist_pos = hand_structure.wrist_position
-        human_fingertips = {
-            "thumb": hand_structure.thumb.tip,
-            "index": hand_structure.index.tip,
-            "middle": hand_structure.middle.tip,
-            "ring": hand_structure.ring.tip,
-            "pinky": hand_structure.pinky.tip,
-        }
-
-        # Compute average distance from wrist to fingertips in human hand
-        human_distances = []
-        for finger, tip_pos in human_fingertips.items():
-            dist = np.linalg.norm(tip_pos - wrist_pos)
-            if dist > 0.01:  # Filter out invalid/too-small distances
-                human_distances.append(dist)
-
-        if len(human_distances) == 0:
-            return self.config.scale_factor  # Fallback to current scale
-
-        avg_human_distance = np.mean(human_distances)
-
-        # Get robot hand fingertip positions
-        if use_neutral_robot_pose:
-            # Save current configuration
-            saved_q = self.configuration.q.copy()
-            # Set to neutral pose
-            self.configuration.q[:] = 0.0
-            self.configuration.update()
-
-        # Get wrist position in robot model
-        t_palm = self.configuration.get_transform_frame_to_world("right_palm", "body")
-        p_palm = t_palm.translation()
-        r_palm = t_palm.rotation().as_matrix()
-        wrist_offset_world = r_palm @ self.config.wrist_offset_palm
-        p_wrist_robot = p_palm + wrist_offset_world
-
-        # Get fingertip positions from robot model using mink Configuration
-        robot_fingertips = {}
-        for finger_name in ["thumb", "index", "middle", "ring", "pinky"]:
-            if finger_name not in self.tasks:
-                continue
-            finger_tasks = self.tasks[finger_name]
-            if "tip" not in finger_tasks:
-                continue
-
-            # Get the frame name and type
-            frame_type, frame_name = FINGER_TARGET_BODIES[finger_name]["tip"]
-
-            # Get transform from mink Configuration
-            try:
-                if frame_type == "body":
-                    t_tip = self.configuration.get_transform_frame_to_world(frame_name, "body")
-                else:  # site
-                    t_tip = self.configuration.get_transform_frame_to_world(frame_name, "site")
-                tip_pos = t_tip.translation()
-                robot_fingertips[finger_name] = tip_pos
-            except Exception:
-                # Fallback: try to get from MuJoCo model directly
-                obj_type = mujoco.mjtObj.mjOBJ_BODY if frame_type == "body" else mujoco.mjtObj.mjOBJ_SITE
-                frame_id = mujoco.mj_name2id(self.model, obj_type, frame_name)
-                if frame_id >= 0:
-                    # Need to forward kinematics - use data
-                    data = mujoco.MjData(self.model)
-                    data.qpos[:] = self.configuration.q
-                    mujoco.mj_forward(self.model, data)
-                    if obj_type == mujoco.mjtObj.mjOBJ_SITE:
-                        tip_pos = data.site(frame_id).xpos.copy()
-                    else:
-                        tip_pos = data.body(frame_id).xpos.copy()
-                    robot_fingertips[finger_name] = tip_pos
-
-        # Restore configuration if we changed it
-        if use_neutral_robot_pose:
-            self.configuration.q[:] = saved_q
-            self.configuration.update()
-
-        # Compute average distance from wrist to fingertips in robot hand
-        robot_distances = []
-        for finger, tip_pos in robot_fingertips.items():
-            dist = np.linalg.norm(tip_pos - p_wrist_robot)
-            if dist > 0.01:  # Filter out invalid/too-small distances
-                robot_distances.append(dist)
-
-        if len(robot_distances) == 0:
-            return self.config.scale_factor  # Fallback to current scale
-
-        avg_robot_distance = np.mean(robot_distances)
-
-        # Compute scale factor
-        if avg_human_distance > 1e-6:
-            scale_factor = avg_robot_distance / avg_human_distance
-        else:
-            return self.config.scale_factor  # Fallback
-
-        return scale_factor
+        # Initialize collision avoidance limits if enabled
+        self.limits: list[Limit] = [ConfigurationLimit(model=model)]
+        if self.config.use_collision_avoidance and self.config.collision_geom_pairs:
+            collision_limit = CollisionAvoidanceLimit(
+                model=model,
+                geom_pairs=self.config.collision_geom_pairs,
+                gain=self.config.collision_gain,
+                minimum_distance_from_collisions=self.config.collision_min_distance,
+                collision_detection_distance=self.config.collision_detection_distance,
+            )
+            self.limits.append(collision_limit)
 
     def _hand_structure_to_landmarks(self, hand_structure: HandStructure) -> np.ndarray:
         """Convert HandStructure to 21x3 landmarks array (MediaPipe format).
@@ -455,20 +342,6 @@ class ORCAHandIKRetargeting:
         Returns:
             The full qpos array for the robot.
         """
-        # Auto-scale if enabled
-        if self.config.auto_scale and isinstance(hand_input, HandStructure):
-            new_scale = self.compute_auto_scale_factor(
-                hand_input, use_neutral_robot_pose=self.config.auto_scale_use_neutral_pose
-            )
-            # Apply exponential smoothing to avoid jitter
-            if self.config.auto_scale_update_rate > 0.0:
-                self.config.scale_factor = (
-                    self.config.auto_scale_update_rate * new_scale
-                    + (1.0 - self.config.auto_scale_update_rate) * self.config.scale_factor
-                )
-            else:
-                self.config.scale_factor = new_scale
-
         targets = self.compute_target_positions(hand_input)
 
         # Use configurable parameters
@@ -478,8 +351,8 @@ class ORCAHandIKRetargeting:
 
         # Perform multiple IK iterations for better convergence
         for iteration in range(self.config.ik_iterations):
-            # Build active tasks list (posture task + finger tasks)
-            active_tasks: list[mink.Task] = [self.posture_task]
+            # Build active tasks list (finger tasks only)
+            active_tasks: list[mink.Task] = []
 
             # Get palm transform and compute wrist position (consistent with compute_target_positions)
             # Recompute each iteration in case configuration changed
@@ -520,8 +393,8 @@ class ORCAHandIKRetargeting:
                     task.set_target(target_se3)
                     active_tasks.append(task)
 
-            # Solve IK
-            vel = mink.solve_ik(self.configuration, active_tasks, dt, solver, damping)
+            # Solve IK with limits (collision avoidance if enabled)
+            vel = mink.solve_ik(self.configuration, active_tasks, dt, solver, damping, limits=self.limits)
 
             # Integrate velocity to update configuration
             self.configuration.integrate_inplace(vel, dt)

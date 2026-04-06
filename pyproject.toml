@@ -94,6 +94,7 @@ module = [
     'sensor_msgs.*',
     'h5py',
     "colorlogging",
+    'mink.*',
 ]
 ignore_missing_imports = true
 

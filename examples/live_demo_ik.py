@@ -53,8 +53,16 @@ def dual_window_process(frame_queue: mp.Queue, running_flag: Flag, window_name: 
     cv2.destroyAllWindows()
 
 
-def inject_target_bodies(mjcf_path: Path) -> str:
-    """Injects mocap bodies into the MJCF XML string for visualization."""
+def inject_target_bodies(mjcf_path: Path, target_joint_types: tuple[str, ...]) -> str:
+    """Inject mocap bodies for tracker sites and ensure IK target sites exist.
+
+    Args:
+        mjcf_path: Path to MJCF model file
+        target_joint_types: Tuple of joint types to visualize (tip, ip, pip, mcp)
+
+    Returns:
+        Modified MJCF XML string
+    """
     tree = ET.parse(mjcf_path)
     root = tree.getroot()
     worldbody = root.find("worldbody")
@@ -63,60 +71,121 @@ def inject_target_bodies(mjcf_path: Path) -> str:
         raise ValueError("Could not find worldbody in MJCF")
 
     # Convert relative paths to absolute paths
-    # MuJoCo can't resolve relative paths when loading from string
     model_dir = mjcf_path.parent
     for asset in root.findall(".//asset"):
         for mesh in asset.findall("mesh"):
             file_attr = mesh.get("file")
             if file_attr and not Path(file_attr).is_absolute():
-                # Convert relative path to absolute
                 abs_path = (model_dir / file_attr).resolve()
                 mesh.set("file", str(abs_path))
 
-    # Add mocap bodies for all keypoints (MCP, PIP, TIP, and IP for thumb)
-    # Use different colors for different joint types
-    joint_colors = {
-        "mcp": "0 1 0 0.7",  # Green for MCP
-        "pip": "0 0 1 0.7",  # Blue for PIP
-        "ip": "1 1 0 0.7",  # Yellow for IP (thumb only)
-        "tip": "1 0 0 0.7",  # Red for TIP
-    }
+    # All IK target sites use blue for consistency
+    ik_site_color = "0 0 1 0.9"  # Blue for all IK targets
 
-    for finger, joints in FINGER_TARGET_BODIES.items():
-        for joint_type in joints.keys():
-            body = ET.SubElement(worldbody, "body")
-            body.set("name", f"target_{finger}_{joint_type}")
-            body.set("mocap", "true")
-            body.set("pos", "0 0 0")
-
-            # Add a visual sphere (smaller than before)
-            geom = ET.SubElement(body, "geom")
-            geom.set("type", "sphere")
-            geom.set("size", "0.003")  # 3mm radius (smaller)
-            geom.set("rgba", joint_colors.get(joint_type, "0.5 0.5 0.5 0.7"))
-            geom.set("contype", "0")  # No collision
-            geom.set("conaffinity", "0")
-
+    # Tip site offsets: [x, y, z] where z is upward direction
     tip_site_specs = {
-        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.018])),
-        "index": ("right_index_ip", np.array([0.0, 0.0, 0.020])),
-        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.022])),
-        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.021])),
-        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.018])),
+        "thumb": ("right_thumb_dp", np.array([0.0, 0.0, 0.025])),
+        "index": ("right_index_ip", np.array([0.0, 0.0, 0.035])),
+        "middle": ("right_middle_ip", np.array([0.0, 0.0, 0.037])),
+        "ring": ("right_ring_ip", np.array([0.0, 0.0, 0.036])),
+        "pinky": ("right_pinky_ip", np.array([0.0, 0.0, 0.032])),
     }
 
-    for finger, (parent_body, offset) in tip_site_specs.items():
-        body_elem = root.find(f".//body[@name='{parent_body}']")
-        if body_elem is None:
-            continue
-        site_name = f"right_{finger}_tip_site"
-        if body_elem.find(f"./site[@name='{site_name}']") is not None:
-            continue
-        site = ET.SubElement(body_elem, "site")
-        site.set("name", site_name)
-        site.set("pos", " ".join(f"{value:.5f}" for value in offset))
-        site.set("size", "0.0025")
-        site.set("rgba", "1 0.6 0.2 0.8")
+    if "tip" in target_joint_types:
+        tip_sites_created = []
+        for finger, (parent_body, offset) in tip_site_specs.items():
+            body_elem = root.find(f".//body[@name='{parent_body}']")
+            if body_elem is None:
+                print(f"Warning: Parent body '{parent_body}' not found for {finger} tip site")
+                continue
+            site_name = f"right_{finger}_tip_site"
+            existing_site = body_elem.find(f"./site[@name='{site_name}']")
+            if existing_site is not None:
+                # Update existing site - make it larger and blue
+                existing_site.set("type", "sphere")  # Ensure type is set
+                existing_site.set("size", "0.005")
+                existing_site.set("rgba", ik_site_color)
+                tip_sites_created.append(f"{finger} (updated)")
+            else:
+                # Create new tip site
+                site = ET.SubElement(body_elem, "site")
+                site.set("name", site_name)
+                site.set("type", "sphere")  # Explicit type for visibility
+                site.set("pos", " ".join(f"{value:.5f}" for value in offset))
+                site.set("size", "0.005")
+                site.set("rgba", ik_site_color)
+                tip_sites_created.append(f"{finger} (created)")
+        print(f"Tip sites: {', '.join(tip_sites_created)}")
+
+    # Add visual markers for IK target bodies (MCP, PIP, IP) that might not have visual geoms
+    allowed_types = set(target_joint_types)
+    markers_added = []
+    for finger_name, bodies in FINGER_TARGET_BODIES.items():
+        for joint_type, (frame_type, frame_name) in bodies.items():
+            if joint_type not in allowed_types:
+                continue
+
+            if frame_type == "body":
+                # Add a visual site to the body for visibility
+                body_elem = root.find(f".//body[@name='{frame_name}']")
+                if body_elem is not None:
+                    # Check if marker site already exists
+                    marker_site_name = f"ik_marker_{frame_name}"
+                    existing_marker = body_elem.find(f"./site[@name='{marker_site_name}']")
+                    if existing_marker is not None:
+                        # Update existing marker
+                        existing_marker.set("size", "0.004")  # Same size as tip sites
+                        existing_marker.set("rgba", ik_site_color)
+                        markers_added.append(f"{finger_name}_{joint_type} (updated)")
+                    else:
+                        # Create new marker site
+                        site = ET.SubElement(body_elem, "site")
+                        site.set("name", marker_site_name)
+                        site.set("pos", "0 0 0")  # At body origin
+                        site.set("size", "0.004")  # Same size as tip sites for consistency
+                        site.set("rgba", ik_site_color)  # Blue for all IK targets
+                        markers_added.append(f"{finger_name}_{joint_type} (created)")
+                else:
+                    print(f"Warning: Body '{frame_name}' not found in MJCF for {finger_name}_{joint_type}")
+            elif frame_type == "site":
+                # This is a tip site - find and update it (should already be handled above, but double-check)
+                found = False
+                for body in root.findall(".//body"):
+                    site_elem = body.find(f"./site[@name='{frame_name}']")
+                    if site_elem is not None:
+                        site_elem.set("size", "0.005")
+                        site_elem.set("rgba", ik_site_color)
+                        found = True
+                        markers_added.append(f"{finger_name}_{joint_type} (site updated)")
+                        break
+                if not found:
+                    print(f"Warning: Site '{frame_name}' not found in MJCF for {finger_name}_{joint_type}")
+
+    print(f"Added/updated {len(markers_added)} IK target markers: {', '.join(markers_added)}")
+
+    # Add mocap bodies for tracker sites (MediaPipe landmarks)
+    # All tracker sites use red for consistency - these represent the actual tracked hand
+    tracker_color = "1 0 0 0.9"  # Red for all tracker sites (actual hand)
+
+    allowed_types = set(target_joint_types)
+    for finger_name, mp_mapping in MP_LANDMARK_INDICES.items():
+        for joint_type, mp_idx in mp_mapping.items():
+            if joint_type not in allowed_types:
+                continue
+
+            # Create mocap body for tracker site
+            mocap_body = ET.SubElement(worldbody, "body")
+            mocap_body.set("name", f"tracker_{finger_name}_{joint_type}")
+            mocap_body.set("mocap", "true")
+            mocap_body.set("pos", "0 0 0")
+
+            # Add visual sphere for tracker site (larger, red)
+            geom = ET.SubElement(mocap_body, "geom")
+            geom.set("type", "sphere")
+            geom.set("size", "0.005")  # 5mm radius (larger than IK targets for visibility)
+            geom.set("rgba", tracker_color)  # Red for all tracker sites
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
 
     return ET.tostring(root, encoding="unicode")
 
@@ -253,7 +322,6 @@ async def main_async(
     label_lookup: dict[int, list[str]],
     camera_matrix: np.ndarray | None = None,
     joint_smoothing: float = 1.0,
-    auto_scale_once: bool = False,
 ) -> None:
     """Async main loop with keyboard handling."""
     running = True
@@ -279,9 +347,6 @@ async def main_async(
     # Initialize joint position smoothing state
     smoothed_qpos = data.qpos.copy()
 
-    # Track if we've computed scale once (for auto-scale-once mode)
-    scale_computed_once = False
-
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while running and viewer.is_running() and cap.isOpened():
             ret, frame = cap.read()
@@ -297,16 +362,6 @@ async def main_async(
 
             if hand_structures:
                 structure = hand_structures[0]
-
-                # --- AUTO-SCALE (once mode) ---
-                if auto_scale_once and not scale_computed_once and ik_solver.config.auto_scale:
-                    # Temporarily disable continuous auto-scaling
-                    ik_solver.config.auto_scale = False
-                    # Compute scale factor once
-                    computed_scale = ik_solver.compute_auto_scale_factor(structure, use_neutral_robot_pose=True)
-                    ik_solver.config.scale_factor = computed_scale
-                    scale_computed_once = True
-                    print(f"[Auto-Scale] Computed scale factor: {computed_scale:.3f}")
 
                 # --- IK SOLVE ---
                 # 1. Update the configuration object with current robot state
@@ -410,7 +465,7 @@ def main() -> None:
     parser.add_argument(
         "--targets",
         type=str,
-        default="tip, ip",
+        default="tip",
         help="Comma-separated joint targets (tip,ip,pip,mcp). Default: tip, ip",
     )
     parser.add_argument(
@@ -429,25 +484,9 @@ def main() -> None:
     parser.add_argument(
         "--joint-smoothing",
         type=float,
-        default=1.0,
+        default=0.7,
         help="Smoothing factor for joint positions (0.0-1.0). \
-        Lower values = more smoothing, higher = less smoothing. Default: 1.0 (no smoothing)",
-    )
-    parser.add_argument(
-        "--auto-scale",
-        action="store_true",
-        help="Enable automatic scale factor computation based on fingertip distances",
-    )
-    parser.add_argument(
-        "--auto-scale-once",
-        action="store_true",
-        help="Compute scale factor once on first hand detection (default: update every frame)",
-    )
-    parser.add_argument(
-        "--auto-scale-update-rate",
-        type=float,
-        default=0.1,
-        help="Exponential smoothing rate for auto-scaling (0.0-1.0). Lower = smoother. Default: 0.1",
+        Lower values = more smoothing, higher = less smoothing. Default: 0.7",
     )
     args = parser.parse_args()
 
@@ -461,16 +500,15 @@ def main() -> None:
         parser.error(f"Unsupported target joint types: {', '.join(invalid)}")
 
     # 1. Setup paths and model
-    script_dir = Path(__file__).parent
-    model_path = script_dir.parent / "models" / args.model if not Path(args.model).is_absolute() else Path(args.model)
-
-    if not model_path.exists():
-        print(f"Error: Model not found at {model_path}")
-        return
+    model_file = Path(args.model)
+    if not model_file.is_absolute():
+        model_file = Path(__file__).parent.parent / args.model
+    if not model_file.exists():
+        raise FileNotFoundError(f"Model file not found: {model_file}")
 
     # 2. Inject visualization bodies (Mocap)
-    print("Injecting visualization targets...")
-    xml_string = inject_target_bodies(model_path)
+    print(f"Loading model from {model_file}")
+    xml_string = inject_target_bodies(model_file, target_joints)
 
     # 3. Load MuJoCo Model
     model = mujoco.MjModel.from_xml_string(xml_string)
@@ -487,25 +525,38 @@ def main() -> None:
 
     ik_config = ORCAHandIKConfig(
         scale_factor=args.scale,
-        wrist_offset_palm=np.array([0.000, 0.0, -0.05]),
         target_joint_types=target_joints,
-        auto_scale=args.auto_scale,
-        auto_scale_update_rate=args.auto_scale_update_rate if args.auto_scale else 0.0,
-        auto_scale_use_neutral_pose=True,
+        lm_damping=0.5,
+        ik_iterations=15,
     )
 
     ik_solver = ORCAHandIKRetargeting(model, config=ik_config)
 
+    # Verify tip sites exist in the loaded model
+    if "tip" in target_joints:
+        print("\nVerifying tip sites in loaded model:")
+        for finger in ["thumb", "index", "middle", "ring", "pinky"]:
+            site_name = f"right_{finger}_tip_site"
+            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+            if site_id >= 0:
+                site_pos = data.site(site_id).xpos.copy()
+                print(f"  ✓ {site_name}: found at position [{site_pos[0]:.4f}, {site_pos[1]:.4f}, {site_pos[2]:.4f}]")
+            else:
+                print(f"  ✗ {site_name}: NOT FOUND in model!")
+
     allowed_joint_types = set(target_joints)
 
     # 5. Helper to map finger names and joint types to mocap body IDs
+    # Note: These use "tracker_" prefix to match the visualization bodies created by inject_target_bodies
     target_body_ids: dict[str, dict[str, int]] = {}
     for finger, joints in FINGER_TARGET_BODIES.items():
         for joint_type in joints.keys():
             if joint_type not in allowed_joint_types:
                 continue
             finger_dict = target_body_ids.setdefault(finger, {})
-            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"target_{finger}_{joint_type}")
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"tracker_{finger}_{joint_type}")
+            if bid < 0:
+                print(f"Warning: Mocap body 'tracker_{finger}_{joint_type}' not found")
             finger_dict[joint_type] = bid
 
     # 6. Main Loop
@@ -538,14 +589,6 @@ def main() -> None:
     if not (0.0 < args.joint_smoothing <= 1.0):
         parser.error("--joint-smoothing must be between 0.0 and 1.0 (exclusive of 0.0)")
 
-    # Validate auto-scale update rate
-    if args.auto_scale and not (0.0 <= args.auto_scale_update_rate <= 1.0):
-        parser.error("--auto-scale-update-rate must be between 0.0 and 1.0")
-
-    # Warn if auto-scale-once is used without auto-scale
-    if args.auto_scale_once and not args.auto_scale:
-        parser.error("--auto-scale-once requires --auto-scale to be enabled")
-
     # Run async main loop
     asyncio.run(
         main_async(
@@ -560,7 +603,6 @@ def main() -> None:
             mp_label_lookup,
             camera_matrix,
             joint_smoothing=args.joint_smoothing,
-            auto_scale_once=args.auto_scale_once,
         )
     )
 

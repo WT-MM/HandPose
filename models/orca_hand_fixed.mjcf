@@ -3,6 +3,11 @@
   <!-- eulerseq "XYZ" corresponds to URDF "rpy" -->
   <compiler angle="radian" eulerseq="XYZ"/>
   
+  <!-- Visual settings for offscreen rendering -->
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
+  
   <default>
     <mesh scale="0.001 0.001 0.001"/>
     <!-- Visual classes -->
@@ -26,8 +31,8 @@
 
   <asset>
     <!-- Materials -->
-    <material name="white" rgba="1 1 1 1" shininess="0.5" specular="0.1"/>
-    <material name="black" rgba="0.25 0.25 0.25 1" shininess="0.2" specular="0.05"/>
+    <material name="white" rgba="1 1 1 0.3" shininess="0.5" specular="0.1"/>
+    <material name="black" rgba="0.25 0.25 0.25 0.3" shininess="0.2" specular="0.05"/>
     <material name="invisible" rgba="1 1 1 0" shininess="0" specular="0"/>
     
     <!-- Visual -->
